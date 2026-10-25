@@ -151,11 +151,13 @@ pub fn foreground_exe() -> Option<String> {
 /// 进程名 → 类别。只做映射，不保存原始进程名。
 pub fn classify(exe: &str) -> AppCategory {
     match exe {
-        // 编码
+        // 编码与终端
         "code.exe" | "code-insiders.exe" | "cursor.exe" | "idea64.exe" | "devenv.exe"
         | "pycharm64.exe" | "webstorm64.exe" | "goland64.exe" | "clion64.exe"
-        | "sublime_text.exe" | "notepad++.exe" | "windowsterminal.exe" | "wt.exe"
-        | "powershell.exe" | "cmd.exe" | "bash.exe" | "wezterm-gui.exe" | "alacritty.exe" => {
+        | "rustrover64.exe" | "rider64.exe" | "datagrip64.exe" | "androidstudio64.exe"
+        | "sublime_text.exe" | "notepad++.exe" | "zed.exe" | "nvim.exe" | "vim.exe"
+        | "windowsterminal.exe" | "wt.exe" | "powershell.exe" | "pwsh.exe" | "cmd.exe"
+        | "bash.exe" | "git-bash.exe" | "mintty.exe" | "wezterm-gui.exe" | "alacritty.exe" => {
             AppCategory::Ide
         }
         // Paper Work：文档 / 表格 / 演示 / 邮件 / 笔记 / 图表。
@@ -187,7 +189,9 @@ pub fn classify(exe: &str) -> AppCategory {
         // AI Agent：独立成类，不并进 IDE。
         // 这些工具的核心动作是「对话/委派/生成」，不是连续写代码；
         // 混进 IDE 会让「编码时长」虚高，也看不到每天真正用了多久 Agent。
-        "workbuddy.exe" | "zcode.exe" | "chatgpt.exe" | "antigravity.exe" | "qoder.exe" => {
+        "workbuddy.exe" | "zcode.exe" | "chatgpt.exe" | "antigravity.exe" | "qoder.exe"
+        | "trae.exe" | "windsurf.exe" | "claude.exe" | "cherry-studio.exe"
+        | "chatbox.exe" | "doubao.exe" | "kimi.exe" => {
             AppCategory::AiAgent
         }
         _ => AppCategory::Other,

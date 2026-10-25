@@ -300,12 +300,12 @@ pub fn add_reminder_full(conn: &Connection, r: &NewReminder) -> rusqlite::Result
     Ok(conn.last_insert_rowid())
 }
 
-/// 未完成的提醒，按时间正序。已触发的也列出来，方便回看。
+/// 未完成的待办提醒（仅真实任务 kind = 0），按时间正序。已触发的也列出来，方便回看。
 pub fn list_reminders(conn: &Connection) -> rusqlite::Result<Vec<Reminder>> {
     let mut stmt = conn.prepare(
         "SELECT id, fire_at, level, title, status, kind, created_at, priority, duration_min,
                 COALESCE(note, ''), COALESCE(location, ''), COALESCE(tz_offset_min, 480)
-         FROM reminders WHERE status IN (0, 1) ORDER BY fire_at ASC LIMIT 200",
+         FROM reminders WHERE status IN (0, 1) AND kind = 0 ORDER BY fire_at ASC LIMIT 200",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -633,43 +633,52 @@ pub fn task_log_since(
 
 /// 「提醒 → 完成」的平均响应秒数。只统计有明确 delta 的 done 事件。
 /// 这是「处理时机」最直白的量化：数字越大说明用户越倾向于拖。
+///
+/// 注意：SQLite 的 `avg(...)` 在有命中行时返回 `REAL` (`f64`)，无命中行时返回 `NULL`，
+/// 必须按 `Option<f64>` 读取再四舍五入转为 `i64`，直接按 `Option<i64>` 读取会报 `InvalidColumnType`。
 pub fn avg_response_sec(conn: &Connection, since: i64) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
         "SELECT avg(delta_sec) FROM task_log
          WHERE action = 'done' AND delta_sec IS NOT NULL AND delta_sec >= 0 AND ts >= ?1",
         params![since],
-        |r| r.get::<_, Option<i64>>(0),
+        |r| r.get::<_, Option<f64>>(0),
     )
+    .map(|opt| opt.map(|v| v.round() as i64))
 }
 
-/// 逾期未处理的待办数（到点已触发但还没完成，且已过 30 分钟）
+/// 逾期未处理的待办数（到点已触发但还没完成，且已过 30 分钟；仅统计真实待办 kind = 0）
 pub fn overdue_count(conn: &Connection, now: i64) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT count(*) FROM reminders
-         WHERE status = 1 AND fired_at IS NOT NULL AND ?1 - fired_at > 1800",
+         WHERE kind = 0 AND status = 1 AND fired_at IS NOT NULL AND ?1 - fired_at > 1800",
         params![now],
         |r| r.get(0),
     )
 }
 
-/// 被顺延过的待办（status=0 但 fired_at 非空 = 曾被取出又挂回去）
+/// 被顺延过的待办（status=0 但 fired_at 非空，或 task_log 中有顺延记录的未结待办）
 pub fn deferred_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT count(*) FROM reminders WHERE status = 0 AND fired_at IS NOT NULL",
+        "SELECT count(*) FROM reminders r
+         WHERE r.kind = 0 AND r.status IN (0, 1)
+           AND (r.fired_at IS NOT NULL AND r.status = 0
+                OR EXISTS (SELECT 1 FROM task_log tl WHERE tl.reminder_id = r.id AND tl.action = 'deferred'))",
         [],
         |r| r.get(0),
     )
 }
 
 pub fn open_task_count(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row("SELECT count(*) FROM reminders WHERE status IN (0,1)", [], |r| {
-        r.get(0)
-    })
+    conn.query_row(
+        "SELECT count(*) FROM reminders WHERE kind = 0 AND status IN (0, 1)",
+        [],
+        |r| r.get(0),
+    )
 }
 
 pub fn done_since(conn: &Connection, since: i64) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT count(*) FROM reminders WHERE status = 2 AND done_at >= ?1",
+        "SELECT count(*) FROM reminders WHERE kind = 0 AND status = 2 AND done_at >= ?1",
         params![since],
         |r| r.get(0),
     )

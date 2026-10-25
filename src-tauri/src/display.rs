@@ -81,6 +81,10 @@ fn point_on_screen(app: &tauri::AppHandle, x: i32, y: i32) -> bool {
         .any(|d| x >= d.x && x < d.x + d.w as i32 && y >= d.y && y < d.y + d.h as i32)
 }
 
+/// 桌宠透明宿主窗口逻辑尺寸（与 tauri.conf.json 保持一致）
+pub const PET_LOGICAL_W: f64 = 280.0;
+pub const PET_LOGICAL_H: f64 = 360.0;
+
 /// 主屏右下角默认位（物理坐标，留 24 逻辑像素边距）
 fn default_pos(app: &tauri::AppHandle) -> Option<PhysicalPosition<i32>> {
     let m = app.primary_monitor().ok().flatten()?;
@@ -88,8 +92,8 @@ fn default_pos(app: &tauri::AppHandle) -> Option<PhysicalPosition<i32>> {
     let s = *m.size();
     let scale = m.scale_factor();
     let margin = (24.0 * scale) as i32;
-    let w = (220.0 * scale) as i32;
-    let h = (250.0 * scale) as i32;
+    let w = (PET_LOGICAL_W * scale) as i32;
+    let h = (PET_LOGICAL_H * scale) as i32;
     Some(PhysicalPosition::new(
         p.x + s.width as i32 - w - margin,
         p.y + s.height as i32 - h - margin,
@@ -150,12 +154,21 @@ pub fn restore_position(app: &tauri::AppHandle) {
             .collect();
         if nums.len() == 2 {
             // 恢复前必须校验：上次可能在外接屏上，这次外接屏没了
-            let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(220, 250));
+            let size = w
+                .outer_size()
+                .unwrap_or(tauri::PhysicalSize::new(PET_LOGICAL_W as u32, PET_LOGICAL_H as u32));
             let cx = nums[0] + size.width as i32 / 2;
             let cy = nums[1] + size.height as i32 / 2;
-            if point_on_screen(app, cx, cy) {
-                let _ = w.set_position(PhysicalPosition::new(nums[0], nums[1]));
-                crate::startup_log(&format!("display: restored pet.pos ({},{})", nums[0], nums[1]));
+            if let Some(d) = list(app)
+                .into_iter()
+                .find(|d| cx >= d.x && cx < d.x + d.w as i32 && cy >= d.y && cy < d.y + d.h as i32)
+            {
+                let max_x = (d.x + d.w as i32 - size.width as i32).max(d.x);
+                let max_y = (d.y + d.h as i32 - size.height as i32).max(d.y);
+                let nx = nums[0].clamp(d.x, max_x);
+                let ny = nums[1].clamp(d.y, max_y);
+                let _ = w.set_position(PhysicalPosition::new(nx, ny));
+                crate::startup_log(&format!("display: restored pet.pos ({nx},{ny})"));
                 return;
             }
             crate::startup_log(&format!(

@@ -47,7 +47,10 @@ pub fn build_day(day: &str) -> Result<crate::db::repo::DayProfile, String> {
     let end = start + 86_400;
 
     let p = crate::db::with_conn(|c| {
-        let (active_sec, first_active, last_active) = c
+        // 先把该日范围内尚未聚合的明细补进 rollup_5m，保证打开「记忆」页时实时可见最新活跃度
+        let _ = crate::db::repo::rollup_range(c, start, end);
+
+        let (active_sec, rollup_first, rollup_last) = c
             .query_row(
                 "SELECT COALESCE(sum(focus_sec), 0), min(bucket), max(bucket)
                  FROM rollup_5m WHERE bucket >= ?1 AND bucket < ?2 AND focus_sec > 0",
@@ -55,6 +58,19 @@ pub fn build_day(day: &str) -> Result<crate::db::repo::DayProfile, String> {
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?)),
             )
             .unwrap_or((0, None, None));
+
+        // 若当天尚有未过期的 5s 明细（近 2 天），优先取精确到秒的首末活跃采样；
+        // 更早的历史日则回落到 5 分钟聚合桶（首桶起点 → 末桶终点）。
+        let (ev_first, ev_last): (Option<i64>, Option<i64>) = c
+            .query_row(
+                "SELECT min(ts), max(ts) FROM events
+                 WHERE ts >= ?1 AND ts < ?2 AND idle_s < 60",
+                rusqlite::params![start, end],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((None, None));
+        let first_active = ev_first.or(rollup_first);
+        let last_active = ev_last.or_else(|| rollup_last.map(|b| b + 300));
 
         // 分类分布：{"0":秒,"1":秒,...}
         let mut cats: Vec<(i64, i64)> = {
@@ -71,7 +87,7 @@ pub fn build_day(day: &str) -> Result<crate::db::repo::DayProfile, String> {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        cats.truncate(7);
+        cats.truncate(8);
         let cat_json = serde_json::to_string(
             &cats.iter().map(|(k, v)| (k.to_string(), *v)).collect::<std::collections::BTreeMap<_, _>>(),
         )
@@ -98,14 +114,14 @@ pub fn build_day(day: &str) -> Result<crate::db::repo::DayProfile, String> {
 
         let remind_cnt: i64 = c
             .query_row(
-                "SELECT count(*) FROM reminders WHERE fired_at >= ?1 AND fired_at < ?2",
+                "SELECT count(*) FROM reminders WHERE kind = 0 AND fired_at >= ?1 AND fired_at < ?2",
                 rusqlite::params![start, end],
                 |r| r.get(0),
             )
             .unwrap_or(0);
         let done_cnt: i64 = c
             .query_row(
-                "SELECT count(*) FROM reminders WHERE done_at >= ?1 AND done_at < ?2",
+                "SELECT count(*) FROM reminders WHERE kind = 0 AND done_at >= ?1 AND done_at < ?2",
                 rusqlite::params![start, end],
                 |r| r.get(0),
             )
@@ -117,7 +133,7 @@ pub fn build_day(day: &str) -> Result<crate::db::repo::DayProfile, String> {
         let p = crate::db::repo::DayProfile {
             day: day.to_string(),
             first_active,
-            last_active: last_active.map(|b| b + 300),
+            last_active,
             active_sec,
             focus_max_sec,
             cat_json,
@@ -265,18 +281,18 @@ fn collect_day(day: &str) -> DayFacts {
 
         let done_titles: Vec<String> = {
             let mut st = c.prepare(
-                "SELECT title FROM reminders WHERE done_at >= ?1 AND done_at < ?2 ORDER BY done_at",
+                "SELECT title FROM reminders WHERE kind = 0 AND done_at >= ?1 AND done_at < ?2 ORDER BY done_at",
             )?;
             let rows = st.query_map(rusqlite::params![start, end], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let created: i64 = c.query_row(
-            "SELECT count(*) FROM reminders WHERE created_at >= ?1 AND created_at < ?2",
+            "SELECT count(*) FROM reminders WHERE kind = 0 AND created_at >= ?1 AND created_at < ?2",
             rusqlite::params![start, end],
             |r| r.get(0),
         ).unwrap_or(0);
         let open_titles: Vec<String> = {
-            let mut st = c.prepare("SELECT title FROM reminders WHERE status IN (0,1) LIMIT 8")?;
+            let mut st = c.prepare("SELECT title FROM reminders WHERE kind = 0 AND status IN (0,1) LIMIT 8")?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -900,6 +916,9 @@ pub fn brief(days: i64, trip_days: i64) -> serde_json::Value {
     let since_profile = now - days * 86_400;
     let since_loc = now - trip_days * 86_400;
 
+    // 刷新今日画像：确保用户打开「记忆」页时看到的是实时最新统计（无需手动点重算）
+    let _ = build_day(&bj_date(now));
+
     let profiles: Vec<crate::db::repo::DayProfile> = crate::db::with_conn(|c| {
         let all = crate::db::repo::day_profiles(c, days.max(1))?;
         Ok(all)
@@ -909,16 +928,31 @@ pub fn brief(days: i64, trip_days: i64) -> serde_json::Value {
     let habits = summarize_habits(&profiles);
 
     let tasks = crate::db::with_conn(|c| {
+        let open = crate::db::repo::open_task_count(c).unwrap_or(0);
+        let overdue = crate::db::repo::overdue_count(c, now).unwrap_or(0);
+        let deferred = crate::db::repo::deferred_count(c).unwrap_or(0);
+        let done_7d = crate::db::repo::done_since(c, since_profile).unwrap_or(0);
+        let avg_response_min = crate::db::repo::avg_response_sec(c, since_profile)
+            .ok()
+            .flatten()
+            .map(|s| (s as f64 / 60.0).round() as i64);
         Ok(json!({
-            "open": crate::db::repo::open_task_count(c)?,
-            "overdue": crate::db::repo::overdue_count(c, now)?,
-            "deferred": crate::db::repo::deferred_count(c)?,
-            "done_7d": crate::db::repo::done_since(c, since_profile)?,
-            "avg_response_min": crate::db::repo::avg_response_sec(c, since_profile)?
-                .map(|s| (s as f64 / 60.0).round() as i64),
+            "open": open,
+            "overdue": overdue,
+            "deferred": deferred,
+            "done_7d": done_7d,
+            "avg_response_min": avg_response_min,
         }))
     })
-    .unwrap_or_else(|_| json!({}));
+    .unwrap_or_else(|_| {
+        json!({
+            "open": 0,
+            "overdue": 0,
+            "deferred": 0,
+            "done_7d": 0,
+            "avg_response_min": null,
+        })
+    });
 
     let risks: Vec<crate::db::repo::RiskRow> =
         crate::db::with_conn(|c| crate::db::repo::open_risks(c, 10)).unwrap_or_default();
@@ -937,7 +971,7 @@ pub fn brief(days: i64, trip_days: i64) -> serde_json::Value {
 
     let open_titles: Vec<String> = crate::db::with_conn(|c| {
         let mut st = c.prepare(
-            "SELECT title FROM reminders WHERE status IN (0,1) ORDER BY fire_at ASC LIMIT 12",
+            "SELECT title FROM reminders WHERE kind = 0 AND status IN (0,1) ORDER BY fire_at ASC LIMIT 12",
         )?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -982,6 +1016,10 @@ fn profile_line(p: &crate::db::repo::DayProfile) -> serde_json::Value {
 
 /// 从若干天的画像里提炼「工作习惯」（均值比单天更能代表习惯）
 fn summarize_habits(ps: &[crate::db::repo::DayProfile]) -> serde_json::Value {
+    summarize_habits_with_offset(ps, crate::tz::offset_secs())
+}
+
+fn summarize_habits_with_offset(ps: &[crate::db::repo::DayProfile], tz_off: i64) -> serde_json::Value {
     let trend = crate::focus::compute_interrupt_trend();
     let live: Vec<&crate::db::repo::DayProfile> =
         ps.iter().filter(|p| p.active_sec > 0).collect();
@@ -996,13 +1034,13 @@ fn summarize_habits(ps: &[crate::db::repo::DayProfile]) -> serde_json::Value {
     let avg_start = live
         .iter()
         .filter_map(|p| p.first_active)
-        .map(|t| t.rem_euclid(86_400) as f64)
+        .map(|t| (t + tz_off).rem_euclid(86_400) as f64)
         .sum::<f64>()
         / live.iter().filter(|p| p.first_active.is_some()).count().max(1) as f64;
     let avg_end = live
         .iter()
         .filter_map(|p| p.last_active)
-        .map(|t| t.rem_euclid(86_400) as f64)
+        .map(|t| (t + tz_off).rem_euclid(86_400) as f64)
         .sum::<f64>()
         / live.iter().filter(|p| p.last_active.is_some()).count().max(1) as f64;
 
@@ -1025,8 +1063,9 @@ fn summarize_habits(ps: &[crate::db::repo::DayProfile]) -> serde_json::Value {
         .take(3)
         .map(|(c, s)| {
             json!({
+                "cat_id": c,
                 "cat": cat_label(c),
-                "share_pct": if total > 0 { s * 100 / total } else { 0 }
+                "share_pct": if total > 0 { (s as f64 * 100.0 / total as f64).round() as i64 } else { 0 }
             })
         })
         .collect();
@@ -1288,18 +1327,20 @@ fn travel_facts(day: Option<&str>) -> serde_json::Value {
 fn task_facts(now: i64) -> serde_json::Value {
     let (open, overdue, deferred, done, avg_resp) = crate::db::with_conn(|c| {
         Ok((
-            crate::db::repo::open_task_count(c)?,
-            crate::db::repo::overdue_count(c, now)?,
-            crate::db::repo::deferred_count(c)?,
-            crate::db::repo::done_since(c, now - 7 * 86_400)?,
-            crate::db::repo::avg_response_sec(c, now - 14 * 86_400)?,
+            crate::db::repo::open_task_count(c).unwrap_or(0),
+            crate::db::repo::overdue_count(c, now).unwrap_or(0),
+            crate::db::repo::deferred_count(c).unwrap_or(0),
+            crate::db::repo::done_since(c, now - 7 * 86_400).unwrap_or(0),
+            crate::db::repo::avg_response_sec(c, now - 14 * 86_400)
+                .ok()
+                .flatten(),
         ))
     })
     .unwrap_or((0, 0, 0, 0, None));
 
     let titles: Vec<String> = crate::db::with_conn(|c| {
         let mut st = c.prepare(
-            "SELECT title FROM reminders WHERE status IN (0,1) ORDER BY fire_at ASC LIMIT 15",
+            "SELECT title FROM reminders WHERE kind = 0 AND status IN (0,1) ORDER BY fire_at ASC LIMIT 15",
         )?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1319,6 +1360,7 @@ fn task_facts(now: i64) -> serde_json::Value {
 }
 
 fn habit_facts() -> serde_json::Value {
+    let _ = build_day(&bj_date(now_sec()));
     let ps: Vec<crate::db::repo::DayProfile> =
         crate::db::with_conn(|c| crate::db::repo::day_profiles(c, 14)).unwrap_or_default();
     json!({ "habits": summarize_habits(&ps), "days": ps.iter().map(profile_line).collect::<Vec<_>>() })
@@ -1489,6 +1531,49 @@ mod tests {
     fn hm_format() {
         assert_eq!(fmt_hm(9.0 * 3600.0 + 5.0 * 60.0), "09:05");
         assert_eq!(fmt_hm(0.0), "00:00");
+    }
+
+    #[test]
+    fn summarize_habits_applies_timezone_offset() {
+        // UTC 04:55 -> 北京时间 (UTC+8) 12:55；UTC 14:10 -> 北京时间 (UTC+8) 22:10
+        let utc_04_55 = 4 * 3600 + 55 * 60;
+        let utc_14_10 = 14 * 3600 + 10 * 60;
+        let p = crate::db::repo::DayProfile {
+            day: "2026-10-25".into(),
+            first_active: Some(utc_04_55),
+            last_active: Some(utc_14_10),
+            active_sec: 123 * 60,
+            focus_max_sec: 50 * 60,
+            cat_json: r#"{"7":3500,"6":1600,"2":1400}"#.into(),
+            remind_cnt: 2,
+            done_cnt: 2,
+            location: "上海".into(),
+            interrupt_cnt: 1,
+        };
+        let h = summarize_habits_with_offset(&[p], 8 * 3600);
+        assert_eq!(h["samples"].as_i64(), Some(1));
+        assert_eq!(h["avg_start"].as_str(), Some("12:55"));
+        assert_eq!(h["avg_end"].as_str(), Some("22:10"));
+        assert_eq!(h["avg_active_min"].as_i64(), Some(123));
+    }
+
+    #[test]
+    fn avg_response_sec_and_deferred_count_with_sqlite_real() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+
+        let id1 = crate::db::repo::add_reminder(&conn, "写周报", 1_792_000_000, 1, 0).unwrap();
+        crate::db::repo::log_task_event(&conn, Some(id1), "created", None, "写周报").unwrap();
+        crate::db::repo::log_task_event(&conn, Some(id1), "deferred", Some(900), "写周报").unwrap();
+        assert_eq!(crate::db::repo::deferred_count(&conn).unwrap(), 1);
+
+        crate::db::repo::set_reminder_status(&conn, id1, 2).unwrap();
+        crate::db::repo::log_task_event(&conn, Some(id1), "done", Some(300), "写周报").unwrap();
+
+        // 以前 SQLite avg(delta_sec) 返回 REAL 导致 Option<i64> 报 InvalidColumnType，现必须正常返回 Some(300)
+        let avg = crate::db::repo::avg_response_sec(&conn, 0).unwrap();
+        assert_eq!(avg, Some(300));
+        assert_eq!(crate::db::repo::done_since(&conn, 0).unwrap(), 1);
     }
 }
 

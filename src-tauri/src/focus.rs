@@ -32,6 +32,8 @@ struct SessionState {
     in_im_episode: bool,
     /// 上次触发 IM 打断提示的时间戳
     last_im_ts: i64,
+    /// 本轮专注期间被自动拦截顺延的软提醒 `(id, title)`（去重）
+    deferred_reminders: Vec<(i64, String)>,
 }
 
 impl Default for SessionState {
@@ -45,6 +47,7 @@ impl Default for SessionState {
             im_interrupts: 0,
             in_im_episode: false,
             last_im_ts: 0,
+            deferred_reminders: Vec::new(),
         }
     }
 }
@@ -93,6 +96,8 @@ pub struct FocusStatus {
     pub remaining_secs: i64,
     pub uninterrupted_secs: i64,
     pub im_interrupts: i64,
+    pub deferred_count: usize,
+    pub deferred_titles: Vec<String>,
     pub trend: InterruptTrend,
 }
 
@@ -102,7 +107,61 @@ pub struct FocusEvent {
     /// `"im_interrupted"` | `"completed"` | `"started"` | `"stopped"`
     pub kind: String,
     pub message: String,
+    pub deferred_ids: Vec<i64>,
+    pub deferred_titles: Vec<String>,
     pub status: FocusStatus,
+}
+
+/// 当前是否正处于手动开启的 50 分钟专注期间
+pub fn is_active() -> bool {
+    state_cell()
+        .lock()
+        .map(|g| g.active)
+        .unwrap_or(false)
+}
+
+/// 专注期间软提醒被拦截时的预计恢复时间戳（本轮专注剩余秒数 + 15 秒缓冲）
+pub fn estimated_end_ts(now: i64) -> i64 {
+    let rem = state_cell()
+        .lock()
+        .map(|g| {
+            if g.active {
+                (g.target_secs - g.active_secs).max(60)
+            } else {
+                60
+            }
+        })
+        .unwrap_or(300);
+    now + rem + 15
+}
+
+/// 记录一条在专注期间被自动拦截顺延的软提醒（按 id 去重）
+pub fn note_deferred_reminder(id: i64, title: &str) {
+    if let Ok(mut g) = state_cell().lock() {
+        if g.active && !g.deferred_reminders.iter().any(|(x, _)| *x == id) {
+            g.deferred_reminders.push((id, title.trim().to_string()));
+        }
+    }
+}
+
+fn format_deferred_tail(deferred: &[(i64, String)]) -> String {
+    if deferred.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = deferred
+        .iter()
+        .take(3)
+        .map(|(_, t)| format!("「{}」", crate::clipboard::truncate_chars(t, 14)))
+        .collect();
+    let more = if deferred.len() > 3 {
+        format!("等 {} 项", deferred.len())
+    } else {
+        format!("共 {} 项", deferred.len())
+    };
+    format!(
+        "\n📬 专注期间已为你静音暂存 {more}非紧急提醒：{}（已在旁侧任务提示窗展开）",
+        names.join("、")
+    )
 }
 
 /// 开启新一轮手动专注（默认 50 分钟）
@@ -121,17 +180,20 @@ pub fn start(target_minutes: Option<i64>) -> FocusEvent {
             im_interrupts: 0,
             in_im_episode: false,
             last_im_ts: 0,
+            deferred_reminders: Vec::new(),
         };
     }
     let st = status();
     let mins = target_secs / 60;
     let msg = format!(
-        "🎯 已开启 {mins} 分钟专注模式\n期间若被即时通讯打断会提醒你；满 {mins} 分钟后提示你起来走走、喝口水。\n📊 {}",
+        "🎯 已开启 {mins} 分钟专注模式\n期间自动屏蔽非紧急提醒（仅高优/日程穿透），被即时通讯打断会提示你；满 {mins} 分钟后提醒你起来走走、喝口水。\n📊 {}",
         st.trend.summary
     );
     FocusEvent {
         kind: "started".into(),
         message: msg,
+        deferred_ids: Vec::new(),
+        deferred_titles: Vec::new(),
         status: st,
     }
 }
@@ -143,6 +205,7 @@ pub fn stop() -> FocusEvent {
         prev = g.clone();
         g.active = false;
         g.in_im_episode = false;
+        g.deferred_reminders.clear();
     }
     let st = status();
     let focused_min = (prev.active_secs / 60).max(if prev.started_at > 0 {
@@ -155,13 +218,22 @@ pub fn stop() -> FocusEvent {
     } else {
         format!("期间被 IM 打断 {} 次", prev.im_interrupts)
     };
+    let deferred_tail = format_deferred_tail(&prev.deferred_reminders);
     let msg = format!(
-        "⏹ 已结束本轮专注（专注约 {focused_min} 分钟，{intr_txt}）。\n📊 {}\n准备好后可随时右键点击「开始专注」进入下一轮。",
+        "⏹ 已结束本轮专注（专注约 {focused_min} 分钟，{intr_txt}）。{deferred_tail}\n📊 {}\n准备好后可随时右键点击「开始专注」进入下一轮。",
         st.trend.summary
     );
+    let deferred_ids = prev.deferred_reminders.iter().map(|(id, _)| *id).collect();
+    let deferred_titles = prev
+        .deferred_reminders
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
     FocusEvent {
         kind: "stopped".into(),
         message: msg,
+        deferred_ids,
+        deferred_titles,
         status: st,
     }
 }
@@ -192,6 +264,8 @@ pub fn status() -> FocusStatus {
         remaining_secs: remaining,
         uninterrupted_secs: s.uninterrupted_secs,
         im_interrupts: s.im_interrupts,
+        deferred_count: s.deferred_reminders.len(),
+        deferred_titles: s.deferred_reminders.into_iter().map(|(_, t)| t).collect(),
         trend: compute_interrupt_trend(),
     }
 }
@@ -213,7 +287,7 @@ pub fn on_perception_tick(
     }
 
     let mut trigger_im: Option<(i64, i64)> = None; // (session_im_cnt, active_min)
-    let mut trigger_done: Option<(i64, i64)> = None; // (target_min, session_im_cnt)
+    let mut trigger_done: Option<(i64, i64, Vec<(i64, String)>)> = None; // (target_min, session_im_cnt, deferred)
 
     {
         let Ok(mut g) = state_cell().lock() else {
@@ -244,9 +318,10 @@ pub fn on_perception_tick(
                 if g.active_secs >= g.target_secs {
                     let target_min = (g.target_secs / 60).max(1);
                     let im_cnt = g.im_interrupts;
+                    let deferred = std::mem::take(&mut g.deferred_reminders);
                     g.active = false;
                     g.in_im_episode = false;
-                    trigger_done = Some((target_min, im_cnt));
+                    trigger_done = Some((target_min, im_cnt, deferred));
                 }
             }
         }
@@ -264,24 +339,31 @@ pub fn on_perception_tick(
         return Some(FocusEvent {
             kind: "im_interrupted".into(),
             message: msg,
+            deferred_ids: Vec::new(),
+            deferred_titles: Vec::new(),
             status: st,
         });
     }
 
-    if let Some((target_min, im_cnt)) = trigger_done {
+    if let Some((target_min, im_cnt, deferred)) = trigger_done {
         let st = status();
+        let deferred_tail = format_deferred_tail(&deferred);
         let msg = if im_cnt == 0 {
             format!(
-                "🎉 已连续专注满 {target_min} 分钟且没有被打断！\n起来走走、喝口水放松一下吧。\n休息好后可右键点击 Mate 选择「开始专注」进入下一轮。"
+                "🎉 已连续专注满 {target_min} 分钟且没有被打断！\n起来走走、喝口水放松一下吧。{deferred_tail}\n休息好后可右键点击 Mate 选择「开始专注」进入下一轮。"
             )
         } else {
             format!(
-                "⏰ 本轮 {target_min} 分钟专注已完成（期间被 IM 打断 {im_cnt} 次）。\n起来走走、喝口水吧！休息好后可右键点击「开始专注」进入下一轮。"
+                "⏰ 本轮 {target_min} 分钟专注已完成（期间被 IM 打断 {im_cnt} 次）。\n起来走走、喝口水吧！{deferred_tail}\n休息好后可右键点击「开始专注」进入下一轮。"
             )
         };
+        let deferred_ids = deferred.iter().map(|(id, _)| *id).collect();
+        let deferred_titles = deferred.into_iter().map(|(_, t)| t).collect();
         return Some(FocusEvent {
             kind: "completed".into(),
             message: msg,
+            deferred_ids,
+            deferred_titles,
             status: st,
         });
     }
@@ -487,6 +569,12 @@ mod tests {
         let im2 = on_perception_tick(base_ts, true, 0, 5, false);
         assert!(im2.is_none());
 
+        // 专注期间模拟拦截到 2 条软提醒（含重复 id 去重）
+        note_deferred_reminder(101, "下午发项目周报");
+        note_deferred_reminder(101, "下午发项目周报");
+        note_deferred_reminder(102, "给测试环境续期");
+        assert_eq!(status().deferred_count, 2);
+
         // 切回工作窗口，继续专注直到累计满 50 分钟（3000s）
         let mut completed = None;
         for _ in 0..500 {
@@ -499,6 +587,8 @@ mod tests {
         let done_ev = completed.expect("should complete 50-minute focus session");
         assert_eq!(done_ev.kind, "completed");
         assert!(done_ev.message.contains("起来走走"));
+        assert!(done_ev.message.contains("下午发项目周报"), "{}", done_ev.message);
+        assert_eq!(done_ev.deferred_ids, vec![101, 102]);
         assert!(!status().active, "session should end automatically so user can manually start next");
     }
 }

@@ -1,0 +1,258 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #2C2C2A;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.alert-card {
+  position: relative;
+  width: calc(100% - 12px);
+  height: calc(100% - 12px);
+  margin: 6px;
+  display: flex;
+  flex-direction: column;
+  background: #FAF8F3;
+  border: 1px solid rgba(44, 44, 42, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(40, 38, 36, 0.20), 0 2px 6px rgba(40, 38, 36, 0.10);
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.alert-card.is-urgent {
+  border-color: rgba(216, 90, 48, 0.45);
+}
+
+.alert-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 7px;
+  background: #F3EFE6;
+  border-bottom: 1px solid rgba(44, 44, 42, 0.07);
+  cursor: move;
+}
+
+.alert-head-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.alert-badge {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #2C2C2A;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.alert-card.is-urgent .alert-badge {
+  color: #C2452D;
+}
+
+.alert-tz {
+  font-size: 10.5px;
+  color: #6B665E;
+  background: rgba(44, 44, 42, 0.06);
+  padding: 1.5px 6px;
+  border-radius: 99px;
+  white-space: nowrap;
+}
+
+.alert-close {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #7A756C;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.alert-close:hover {
+  background: rgba(44, 44, 42, 0.08);
+  color: #2C2C2A;
+}
+
+.alert-list {
+  flex: 1;
+  padding: 8px 12px 6px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.alert-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.alert-list::-webkit-scrollbar-thumb {
+  background: rgba(44, 44, 42, 0.2);
+  border-radius: 2px;
+}
+
+.alert-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  background: #FFFFFF;
+  border: 1px solid rgba(44, 44, 42, 0.07);
+  border-radius: 9px;
+}
+
+.alert-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.alert-item-title-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.pri-tag {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #FCEAE5;
+  color: #C2452D;
+  flex-shrink: 0;
+}
+
+.alert-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #242320;
+  line-height: 1.38;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.alert-item-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #746F66;
+  line-height: 1.35;
+}
+
+.item-done-mini {
+  flex-shrink: 0;
+  padding: 3px 7px;
+  border: 1px solid rgba(46, 125, 82, 0.3);
+  border-radius: 6px;
+  background: #EEF7F1;
+  color: #256B45;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.item-done-mini:hover {
+  background: #DCEFE3;
+}
+
+.alert-warm {
+  padding: 0 12px 6px;
+  font-size: 11px;
+  color: #6B665E;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.alert-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px 9px;
+  background: #F5F2E9;
+  border-top: 1px solid rgba(44, 44, 42, 0.07);
+}
+
+.btn-act {
+  border: 1px solid rgba(44, 44, 42, 0.12);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #FFFFFF;
+  color: #2C2C2A;
+  transition: background 0.14s ease, transform 0.1s ease;
+  white-space: nowrap;
+}
+
+.btn-act:hover {
+  background: #EFECE1;
+}
+
+.btn-act:active {
+  transform: scale(0.98);
+}
+
+.btn-done {
+  flex: 1.2;
+  background: #2E7D52;
+  border-color: #276B46;
+  color: #FFFFFF;
+}
+
+.btn-done:hover {
+  background: #256643;
+}
+
+.btn-snooze {
+  flex: 1;
+}
+
+.btn-panel {
+  padding: 6px 8px;
+  color: #5A554C;
+}
+
+.alert-progress-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(44, 44, 42, 0.06);
+}
+
+.alert-progress-bar {
+  height: 100%;
+  width: 100%;
+  background: #3B7A57;
+  transform-origin: left center;
+  transition: width 0.15s linear;
+}
+
+.alert-card.is-urgent .alert-progress-bar {
+  background: #D85A30;
+}

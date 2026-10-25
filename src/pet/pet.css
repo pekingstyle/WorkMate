@@ -242,43 +242,45 @@ body.state-drag .shadow { opacity: 0; }
   100% { opacity: 0; transform: translateY(-10px) scale(0.95); }
 }
 
-/* ---------- 气泡 ---------- */
+/* ---------- 气泡（自适应高度：1~8行免滚动，超长封顶 188px） ---------- */
 .bubble {
   position: absolute;
-  /* 必须显式给宽度：绝对定位 + 只写 left:50% 时，浏览器按「容器宽 - left」
-     （此处只有 110px）做 shrink-to-fit，导致 3~4 个汉字就换行。
-     这是实拍截图里"文字挤成竖条"的根因。 */
   left: 50%;
-  /* 几何约束（窗口 220×250）：bottom + max-height ≤ 246 才不会顶出窗口。
-     160 + 86 = 246，正好留 4px 上边距；宠物头顶在 y=92，气泡底边在 y=90，
-     小三角（-5px）刚好压在帽尖上，视觉上连在一起。
-     注意全局 border-box：content-box 会把 12px×2 的 padding 加在 196 外面变成 220，
-     正好顶满窗口、上沿被裁（实测 getBoundingClientRect 抓到 top=-14）。 */
+  /* 透明宿主窗为 280×360，宠物头顶在 bottom: 158px，气泡底边在 bottom: 160px。
+     上方留有 200px 透明空间（160 + 188 = 348 < 360）：
+       - 1~2 行短消息自动收缩贴合（height: auto, width: max-content）；
+       - 3~8 行中等消息（约 150 字以内）自然向上长高，完全无需手动滚动；
+       - 超过 188px 的长文自动封顶，避免流式输出或长文无限生长撑满屏幕。 */
   bottom: 160px;
-  width: 196px;
-  max-width: calc(100% - 12px);
+  width: max-content;
+  min-width: 124px;
+  max-width: 256px;
+  height: auto;
+  max-height: 188px;
   transform: translateX(-50%);
   /* 外层不滚动：尾巴（::after）挂在这里才不会跟着内容跑 */
-  max-height: 86px;
   pointer-events: auto;
   padding: 9px 12px;
   background: #FFFFFF;
   color: #2C2C2A;
-  /* 钉钉进步体字面偏宽，字号保持 13.5px、行高 1.6 更透气 */
-  font: 400 13.5px/1.6 var(--font-hand);
+  /* 钉钉进步体字面偏宽，字号保持 13.5px、行高 1.58 更透气 */
+  font: 400 13.5px/1.58 var(--font-hand);
   letter-spacing: 0;
   /* 长英文/数字串（提醒 id、URL）不要撑破气泡 */
   overflow-wrap: anywhere;
   text-align: left;
   border-radius: 12px;
-  box-shadow: 0 4px 14px rgba(40, 38, 36, 0.14), 0 1px 3px rgba(40, 38, 36, 0.08);
+  box-shadow: 0 6px 18px rgba(40, 38, 36, 0.15), 0 1px 3px rgba(40, 38, 36, 0.08);
   opacity: 0;
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
-/* 细滚动条：默认宽度在 210px 的气泡里太占地 */
-/* 滚动容器：AI 回答可能几百字，限高 + 内部滚动（窗口只有 250px 高） */
+.bubble.is-thinking {
+  color: #6B665E;
+  font-style: italic;
+}
+/* 细滚动条：仅当回答超过 8 行（>168px）时才启用滚动 */
 .bubble-body {
-  max-height: 66px;
+  max-height: 168px;
   overflow-y: auto;
   overscroll-behavior: contain;
   /* 允许选中复制答案 */
@@ -321,7 +323,10 @@ body.is-hidden .zzz span {
 .ctxmenu {
   position: absolute;
   z-index: 100;
-  min-width: 132px;
+  min-width: 148px;
+  max-width: calc(100% - 10px);
+  max-height: calc(100vh - 10px);
+  overflow-y: auto;
   padding: 5px;
   background: #FFFFFF;
   border: 1px solid rgba(40, 38, 36, 0.10);
@@ -356,6 +361,9 @@ body.is-hidden .zzz span {
   color: #2C2C2A;
   font: inherit;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
 }
 

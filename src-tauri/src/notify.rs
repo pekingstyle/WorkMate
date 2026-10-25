@@ -25,6 +25,7 @@ pub const DEFER_SECS: i64 = 600;
 
 /// 默认中国标准时区偏移（秒）：UTC+8 = 28800。
 /// 底层实际生效时区由 `crate::tz` 按用户当前城市动态解析（未设置城市或国内城市默认 UTC+8）。
+#[cfg(test)]
 pub const BJ_OFFSET_SECS: i64 = 8 * 3600;
 
 fn now_sec() -> i64 {
@@ -60,6 +61,7 @@ pub fn bj_day_start() -> i64 {
 /// 供大模型返回的绝对时间使用。为什么要绝对时间：
 /// 「在出差之前订票」是**跨条目的相对关系**，单一的「从现在起多少分钟」
 /// 表达不了——实测模型会直接回 -1，再被兜底成「30 分钟后」，完全答非所问。
+#[cfg(test)]
 pub fn parse_bj_datetime(s: &str) -> Option<i64> {
     crate::tz::parse_datetime_in_tz(s, crate::tz::offset_min())
 }

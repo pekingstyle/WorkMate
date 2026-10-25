@@ -427,6 +427,104 @@
   .risk-l2 { color: #B8860B; }
   .risk-l3 { color: #C0392B; }
 
+  /* 习惯与风险卡片布局 */
+  .hb-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin: 4px 0 10px;
+  }
+  .hb-kpi {
+    background: var(--soft);
+    border-radius: 9px;
+    padding: 8px 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+  .hb-kpi b {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+  }
+  .hb-kpi span {
+    font-size: 10.5px;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+  .hb-sec {
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px dashed var(--line);
+  }
+  .hb-sec-k {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .hb-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    align-items: center;
+  }
+  .hb-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--soft);
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .hb-chip i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .hb-chip.warn {
+    background: #FDE8E6;
+    color: var(--err);
+    font-weight: 600;
+  }
+  .hb-chip.ok {
+    background: #E6F4EA;
+    color: var(--ok);
+  }
+  .hb-trend-box {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--soft);
+    border-radius: 8px;
+    padding: 6px 9px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .hb-trend-tag {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: #EDE9FE;
+    color: #6D28D9;
+    flex-shrink: 0;
+  }
+  .hb-trend-tag.up { background: #FDE8E6; color: var(--err); }
+  .hb-trend-tag.down { background: #E6F4EA; color: var(--ok); }
+
   .log-list { margin-top: 9px; }
   .log-item {
     display: flex; justify-content: space-between; gap: 8px;
@@ -566,6 +664,12 @@
     <div class="card">
       <h2>偏好</h2>
       <label class="switch-row">
+        <input type="checkbox" id="opt-stream" checked />
+        <span>流式输出回答（边生成边展示，自动隐藏思考过程）</span>
+      </label>
+      <div class="hint">开启后「选中即问」将实时流式输出到自适应气泡；推理模型的 &lt;think&gt; 思考链会被自动过滤（期间仅显示「正在思考…」），不会把气泡撑大。</div>
+
+      <label class="switch-row" style="margin-top:10px">
         <input type="checkbox" id="opt-lowpower" />
         <span>低功耗模式（静态形象）</span>
       </label>
@@ -628,18 +732,29 @@
 
     <div class="card">
       <h2>习惯与风险</h2>
-      <div class="row"><span class="k">样本天数</span><span class="v" id="hb-samples">—</span></div>
-      <div class="row"><span class="k">平均开工 / 收工</span><span class="v" id="hb-span">—</span></div>
-      <div class="row"><span class="k">日均活跃</span><span class="v" id="hb-active">—</span></div>
-      <div class="row"><span class="k">时间去向</span><span class="v" id="hb-cats">—</span></div>
-      <div class="row"><span class="k">专注打断统计</span><span class="v" id="hb-intr-trend">—</span></div>
-      <div class="row"><span class="k">待办</span><span class="v" id="hb-tasks">—</span></div>
-      <div id="risk-list" class="rm-list"></div>
+      <div class="hb-grid">
+        <div class="hb-kpi"><b id="hb-samples">—</b><span>样本天数</span></div>
+        <div class="hb-kpi"><b id="hb-span">—</b><span>平均开工 / 收工</span></div>
+        <div class="hb-kpi"><b id="hb-active">—</b><span>日均活跃</span></div>
+      </div>
+      <div class="hb-sec">
+        <div class="hb-sec-k"><span>时间去向（Top 3）</span></div>
+        <div class="hb-chips" id="hb-cats">—</div>
+      </div>
+      <div class="hb-sec">
+        <div class="hb-sec-k"><span>专注打断统计</span></div>
+        <div class="hb-trend-box" id="hb-intr-trend">—</div>
+      </div>
+      <div class="hb-sec">
+        <div class="hb-sec-k"><span>待办执行概况</span></div>
+        <div class="hb-chips" id="hb-tasks">—</div>
+      </div>
+      <div id="risk-list" class="rm-list" style="margin-top:8px"></div>
       <div class="actions">
         <button id="mem-scan">重新检查风险</button>
         <button id="mem-rebuild">重算每日画像</button>
       </div>
-      <div class="hint">「习惯」由每日画像（按北京时间自然日）统计得出；风险每 10 分钟重算一次。</div>
+      <div class="hint">「习惯」按当前生效城市时区自然日统计得出；风险每 10 分钟自动巡检一次。</div>
     </div>
 
     <div class="card">

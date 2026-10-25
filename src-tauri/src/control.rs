@@ -795,7 +795,7 @@ fn route(method: &str, path: &str, query: &str, body: &str, app: &tauri::AppHand
         },
         ("GET", "/db/reminder/done") => {
             let id = q.get("id").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-            match crate::commands::complete_reminder(app.state::<crate::db::Db>(), id) {
+            match crate::commands::complete_reminder(app.clone(), app.state::<crate::db::Db>(), id) {
                 Ok(v) => ok(json!(v)),
                 Err(e) => err(&e),
             }
@@ -811,7 +811,7 @@ fn route(method: &str, path: &str, query: &str, body: &str, app: &tauri::AppHand
 
         ("GET", "/db/reminder/del") => {
             let id = q.get("id").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-            match crate::commands::delete_reminder(app.state::<crate::db::Db>(), id) {
+            match crate::commands::delete_reminder(app.clone(), app.state::<crate::db::Db>(), id) {
                 Ok(v) => ok(json!(v)),
                 Err(e) => err(&e),
             }
@@ -846,7 +846,8 @@ fn route(method: &str, path: &str, query: &str, body: &str, app: &tauri::AppHand
             let base = g("base");
             let model = g("model");
             let key = g("key");
-            match crate::commands::save_llm_config(base, model, key) {
+            let stream = q.get("stream").map(|v| v != "0" && v != "false");
+            match crate::commands::save_llm_config(base, model, key, stream) {
                 Ok(v) => ok(serde_json::to_value(v).unwrap_or(json!(null))),
                 Err(e) => err(&e),
             }

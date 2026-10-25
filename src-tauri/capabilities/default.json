@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "WorkMate 默认能力：pet/panel 两个窗口授予核心默认权限集（事件监听/触发是必须项——感知 tick、到点提醒、AI 回答全靠 plugin:event|listen 送达前端；拖拽要 start_dragging）",
-  "windows": ["pet", "panel"],
+  "description": "WorkMate 默认能力：pet/panel/alert 三个窗口授予核心默认权限集（事件监听/触发是必须项——感知 tick、到点提醒、AI 回答全靠 plugin:event|listen 送达前端；拖拽要 start_dragging）",
+  "windows": ["pet", "panel", "alert"],
   "permissions": ["core:default", "core:window:allow-start-dragging"]
 }

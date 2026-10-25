@@ -183,30 +183,60 @@ function bjWhen(ts: number, offsetMin = petTz.offset_min): string {
   return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${hm}`;
 }
 
-function say(text: string, ms = 4200): void {
+let bubbleHovering = false;
+let pendingHideMs = 4200;
+
+function scheduleBubbleHide(ms: number): void {
+  pendingHideMs = ms;
+  clearTimeout(bubbleTimer);
+  if (bubbleHovering) return;
+  bubbleTimer = window.setTimeout(() => {
+    if (bubbleHovering) return;
+    bubble.classList.remove("show", "is-thinking");
+    window.setTimeout(() => {
+      if (!bubble.classList.contains("show")) {
+        bubble.hidden = true;
+      }
+    }, 200);
+  }, ms);
+}
+
+bubble.addEventListener("mouseenter", () => {
+  bubbleHovering = true;
+  clearTimeout(bubbleTimer);
+});
+
+bubble.addEventListener("mouseleave", () => {
+  bubbleHovering = false;
+  if (!bubble.hidden && bubble.classList.contains("show")) {
+    scheduleBubbleHide(Math.max(2800, Math.min(pendingHideMs, 6000)));
+  }
+});
+
+function say(text: string, ms = 4200, keepScroll = false): void {
+  bubble.classList.remove("is-thinking");
   bubbleText.textContent = text;
   // 诊断面包屑：气泡会自动隐藏，测试侧断言时多半已经晚了；
   // 这里把最后一句留在 body.dataset 上，供 /evalr 回读（不影响 UI）。
   document.body.dataset.lastSay = text;
   bubble.hidden = false;
   // 必须先归零滚动：上一条如果是长回答被滚到中段，下一条短句会从中间开始显示，
-  // 看上去就像"顶部被裁掉"（截图里踩到过）。滚动发生在内层 bubbleBody 上。
-  bubbleBody.scrollTop = 0;
+  // 看上去就像"顶部被裁掉"（截图里踩到过）。流式增量完成时则保留当前位置。
+  if (!keepScroll) {
+    bubbleBody.scrollTop = 0;
+  }
   requestAnimationFrame(() => bubble.classList.add("show"));
 
-  clearTimeout(bubbleTimer);
-  bubbleTimer = window.setTimeout(() => {
-    bubble.classList.remove("show");
-    window.setTimeout(() => {
-      bubble.hidden = true;
-    }, 200);
-  }, ms);
+  // 按字数自适应延长阅读时间（显式短提示如 2200ms 除外）
+  const effectiveMs =
+    ms <= 3000 ? ms : Math.max(ms, Math.min(18_000, 4500 + text.length * 60));
+  scheduleBubbleHide(effectiveMs);
 
   setState("talk");
   clearTimeout(oneshotTimer);
   oneshotTimer = window.setTimeout(() => {
     if (current === "talk") setState("idle");
-  }, Math.min(ms, 2600));
+  }, Math.min(effectiveMs, 2600));
 }
 
 function addFx(kind: "heart" | "bang", ms = 2000): void {
@@ -293,7 +323,7 @@ function showMenu(x: number, y: number): void {
       focusActive = Boolean(fst.active);
       if (fst.active) {
         const mins = Math.floor((fst.active_secs || 0) / 60);
-        focusBtn.textContent = `⏹ 结束专注（已 ${mins} 分钟 · 打断 ${fst.im_interrupts || 0} 次）`;
+        focusBtn.textContent = `⏹ 结束专注 (${mins}m · 断${fst.im_interrupts || 0}次)`;
       } else {
         focusBtn.textContent = "🎯 开始专注";
       }
@@ -549,11 +579,52 @@ async function initPerception(): Promise<void> {
       say(text, 9000 + (n - 1) * 1500);
     });
 
+    // 流式输出：思考阶段只展示单行「💭 正在思考…」，正文阶段自适应长高并平滑跟随
+    let activeStreamReqId = 0;
+    await listen<{
+      req_id: number;
+      phase: "thinking" | "streaming" | "done";
+      text: string;
+    }>("wm:answer_stream", (ev) => {
+      const p = ev.payload;
+      if (!p || !p.text) return;
+      activeStreamReqId = p.req_id || 0;
+      if (p.phase === "thinking") {
+        bubble.classList.add("is-thinking");
+        bubbleText.textContent = p.text;
+        bubble.hidden = false;
+        bubbleBody.scrollTop = 0;
+        requestAnimationFrame(() => bubble.classList.add("show"));
+        scheduleBubbleHide(30_000);
+        return;
+      }
+      const nearBottom =
+        bubbleBody.scrollHeight - bubbleBody.scrollTop - bubbleBody.clientHeight < 28;
+      bubble.classList.remove("is-thinking");
+      bubbleText.textContent = p.text;
+      document.body.dataset.lastSay = p.text;
+      document.body.dataset.lastAnswer = p.text;
+      bubble.hidden = false;
+      requestAnimationFrame(() => {
+        bubble.classList.add("show");
+        if (nearBottom) {
+          bubbleBody.scrollTop = bubbleBody.scrollHeight;
+        }
+      });
+      if (p.phase === "done") {
+        say(p.text, AI_BUBBLE_MS, true);
+      } else {
+        scheduleBubbleHide(25_000);
+      }
+    });
+
     // 选中即问：Rust 侧（热键线程 / 右键菜单）把答案或错误推过来，气泡负责展示。
     // 窗口此时多半是隐藏的，事件机制不依赖窗口焦点，照常送达。
     await listen<string>("wm:answer", (ev) => {
       document.body.dataset.lastAnswer = ev.payload;
-      say(ev.payload, AI_BUBBLE_MS);
+      // 若刚刚已由流式 done 渲染过完全一致的文本，保持滚动位置不跳回顶部
+      const keepScroll = activeStreamReqId > 0 && bubbleText.textContent === ev.payload;
+      say(ev.payload, AI_BUBBLE_MS, keepScroll);
     });
     // AI 建待办/行程成功：气泡确认「记下了什么、什么时候、优先级/地点」+「当前工作负载衔接评估」
     await listen<{

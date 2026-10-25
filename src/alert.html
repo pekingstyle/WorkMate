@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>WorkMate · 任务提示</title>
+  <link rel="stylesheet" href="./alert/alert.css" />
+</head>
+<body>
+  <div class="alert-card" id="alertCard">
+    <header class="alert-head" data-tauri-drag-region>
+      <div class="alert-head-left" data-tauri-drag-region>
+        <span class="alert-badge" id="alertBadge">🔔 待办提醒</span>
+        <span class="alert-tz" id="alertTz" hidden></span>
+      </div>
+      <button type="button" class="alert-close" id="btnClose" title="稍后处理 (隐藏弹窗)">×</button>
+    </header>
+
+    <div class="alert-list" id="alertList"></div>
+
+    <div class="alert-warm" id="alertWarm" hidden></div>
+
+    <footer class="alert-actions">
+      <button type="button" class="btn-act btn-done" id="btnDone">✅ 完成</button>
+      <button type="button" class="btn-act btn-snooze" id="btnSnooze15">⏳ +15分钟</button>
+      <button type="button" class="btn-act btn-snooze" id="btnSnooze60">⏳ +1小时</button>
+      <button type="button" class="btn-act btn-panel" id="btnOpenPanel" title="打开主面板查看详情">📋 面板</button>
+    </footer>
+
+    <div class="alert-progress-track">
+      <div class="alert-progress-bar" id="alertProgressBar"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./alert/main.ts"></script>
+</body>
+</html>

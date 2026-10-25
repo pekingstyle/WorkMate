@@ -59,10 +59,18 @@ pub(crate) fn get_llm_config() -> llm::LlmView {
 /// 保存配置。api_key 为空表示「沿用已存的 key」（避免前端每次都要重填）。
 /// 传 "__CLEAR__" 表示清空 key。
 #[tauri::command]
-pub(crate) fn save_llm_config(base_url: String, model: String, api_key: String) -> Result<llm::LlmView, String> {
+pub(crate) fn save_llm_config(
+    base_url: String,
+    model: String,
+    api_key: String,
+    stream: Option<bool>,
+) -> Result<llm::LlmView, String> {
     let mut f = llm::load_file();
     f.base_url = base_url.trim().trim_end_matches('/').to_string();
     f.model = model.trim().to_string();
+    if let Some(st) = stream {
+        f.stream = st;
+    }
 
     match api_key.trim() {
         "" => { /* 保持不变 */ }
@@ -116,7 +124,10 @@ pub(crate) fn assess_workload(new_ids: &[i64]) -> serde_json::Value {
         .sum();
     let focus_min_today = (focus_sec_today as f64 / 60.0).round() as i64;
 
-    let active: Vec<&db::repo::Reminder> = reminders.iter().filter(|r| r.status != 2).collect();
+    let active: Vec<&db::repo::Reminder> = reminders
+        .iter()
+        .filter(|r| r.status != 2 && r.kind == 0)
+        .collect();
     let active_count = active.len();
     let pending_count = active.iter().filter(|r| r.status == 0).count();
     let overdue_count = active
@@ -319,14 +330,36 @@ pub(crate) fn ask_clipboard_sync(app: tauri::AppHandle, mode: Option<String>) ->
         llm::detect_kind(&text),
         m
     ));
+    static STREAM_REQ_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let req_id = STREAM_REQ_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let f = llm::load_file();
+    let app_stream = app.clone();
     let answer = if m == llm::Mode::Explain {
         let wl = assess_workload(&[]);
         let ctx = wl["prompt_ctx"].as_str().unwrap_or("");
-        llm::chat_clipboard_scene(&llm::load_file(), &bounded, scene, ctx)?
+        llm::chat_clipboard_scene_with_stream(&f, &bounded, scene, ctx, |phase, chunk_text| {
+            let _ = app_stream.emit(
+                "wm:answer_stream",
+                serde_json::json!({
+                    "req_id": req_id,
+                    "phase": phase,
+                    "text": chunk_text,
+                }),
+            );
+        })?
     } else {
-        llm::chat_mode(&llm::load_file(), &bounded, m)?
+        llm::chat_mode_with_stream(&f, &bounded, m, |phase, chunk_text| {
+            let _ = app_stream.emit(
+                "wm:answer_stream",
+                serde_json::json!({
+                    "req_id": req_id,
+                    "phase": phase,
+                    "text": chunk_text,
+                }),
+            );
+        })?
     };
-    startup_log(&format!("ask_clipboard: answer {} chars", answer.chars().count()));
+    startup_log(&format!("ask_clipboard: answer {} chars (stream={})", answer.chars().count(), f.stream));
     let _ = app.emit("wm:answer", &answer);
     Ok(answer)
 }
@@ -461,6 +494,7 @@ pub(crate) fn ai_task_sync(
         draft.title, draft.in_minutes, draft.duration_min, draft.priority
     ));
     let _ = app.emit("wm:task", &payload);
+    let _ = app.emit("wm:reminders-changed", ());
     Ok(payload)
 }
 
@@ -514,6 +548,7 @@ pub(crate) fn ai_task_from_clipboard_sync(
             "workload": wl,
         });
         let _ = app.emit("wm:task", &payload);
+        let _ = app.emit("wm:reminders-changed", ());
         return Ok(payload);
     }
     ai_task_sync(app, db, bounded)
@@ -909,20 +944,33 @@ pub(crate) fn list_reminders(db: tauri::State<db::Db>) -> Result<Vec<db::repo::R
 /// 标完成。顺带记一笔生命周期——「提醒后多久才处理」就是从这里来的，
 /// 不记的话「处理时机」这个维度根本无从量化。
 #[tauri::command]
-pub(crate) fn complete_reminder(db: tauri::State<db::Db>, id: i64) -> Result<bool, String> {
+pub(crate) fn complete_reminder(
+    app: tauri::AppHandle,
+    db: tauri::State<db::Db>,
+    id: i64,
+) -> Result<bool, String> {
     let ok = db.with(|c| db::repo::set_reminder_status(c, id, 2))?;
     if ok {
         let _ = db.with(|c| db::repo::log_task_event(c, Some(id), "done", None, ""));
+        let _ = app.emit("wm:reminders-changed", ());
     }
     Ok(ok)
 }
 
 #[tauri::command]
-pub(crate) fn delete_reminder(db: tauri::State<db::Db>, id: i64) -> Result<bool, String> {
-    db.with(|c| {
+pub(crate) fn delete_reminder(
+    app: tauri::AppHandle,
+    db: tauri::State<db::Db>,
+    id: i64,
+) -> Result<bool, String> {
+    let ok = db.with(|c| {
         c.execute("DELETE FROM reminders WHERE id = ?1", rusqlite::params![id])
             .map(|n| n > 0)
-    })
+    })?;
+    if ok {
+        let _ = app.emit("wm:reminders-changed", ());
+    }
+    Ok(ok)
 }
 
 /* ------------------------------ 数据层命令 ------------------------------ */
@@ -1378,7 +1426,7 @@ pub(crate) fn today_summary_sync(db: &db::Db) -> Result<TodaySummary, String> {
 
     let counts = db.with(|c| -> rusqlite::Result<(i64, i64, i64, i64)> {
         let pending: i64 = c.query_row(
-            "SELECT count(*) FROM reminders WHERE status = 0",
+            "SELECT count(*) FROM reminders WHERE kind = 0 AND status = 0",
             [],
             |r| r.get(0),
         )?;
@@ -1387,7 +1435,7 @@ pub(crate) fn today_summary_sync(db: &db::Db) -> Result<TodaySummary, String> {
         };
         Ok((
             pending,
-            param_q("SELECT count(*) FROM reminders WHERE status = 2 AND done_at >= ?1")?,
+            param_q("SELECT count(*) FROM reminders WHERE kind = 0 AND status = 2 AND done_at >= ?1")?,
             param_q("SELECT count(*) FROM reminders WHERE kind = 1 AND fired_at >= ?1")?,
             param_q("SELECT count(*) FROM reminders WHERE kind = 2 AND fired_at >= ?1")?,
         ))
@@ -1682,6 +1730,200 @@ pub(crate) fn focus_start(app: tauri::AppHandle, minutes: Option<i64>) -> serde_
 pub(crate) fn focus_stop(app: tauri::AppHandle) -> serde_json::Value {
     let ev = crate::focus::stop();
     let _ = app.emit("wm:focus", &ev);
+    if !ev.deferred_ids.is_empty() {
+        flush_focus_deferred_alert(&app, &ev.deferred_ids);
+    }
     serde_json::to_value(ev).unwrap_or_default()
+}
+
+/* ------------------------------ 独立任务提示弹出窗面板（alert 窗口） ------------------------------ */
+
+fn last_alert_cell() -> &'static std::sync::Mutex<serde_json::Value> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<serde_json::Value>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(serde_json::Value::Null))
+}
+
+/// 将独立任务提示弹出窗定位在桌宠窗口旁侧（优先左侧偏上，空间不足则右侧，并做屏幕边界夹取）
+fn place_alert_beside_pet(app: &tauri::AppHandle, alert: &tauri::WebviewWindow) {
+    let Some(pet) = app.get_webview_window("pet") else {
+        return;
+    };
+    let (Ok(pp), Ok(ps), Ok(az)) = (pet.outer_position(), pet.outer_size(), alert.outer_size()) else {
+        return;
+    };
+
+    let monitor = pet.current_monitor().ok().flatten();
+    let (mx, my, mw, mh) = match monitor {
+        Some(m) => {
+            let p = *m.position();
+            let s = *m.size();
+            (p.x, p.y, s.width as i32, s.height as i32)
+        }
+        None => (0, 0, 1920, 1080),
+    };
+
+    let gap = 10;
+    let mut x = pp.x - az.width as i32 - gap;
+    if x < mx + 8 {
+        x = pp.x + ps.width as i32 + gap;
+    }
+    // 与桌宠底部对齐并略微上提，使视觉重心与宠物平齐
+    let mut y = pp.y + ps.height as i32 - az.height as i32 - 12;
+    if y < my + 8 {
+        y = my + 8;
+    }
+    if y + az.height as i32 > my + mh - 8 {
+        y = my + mh - az.height as i32 - 8;
+    }
+    if x + az.width as i32 > mx + mw - 8 {
+        x = mx + mw - az.width as i32 - 8;
+    }
+    let _ = alert.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// 唤出独立任务提示弹出窗并推送最新提醒数据（不抢占键盘焦点）
+pub(crate) fn push_alert_window(app: &tauri::AppHandle, payload: serde_json::Value) {
+    if let Ok(mut g) = last_alert_cell().lock() {
+        *g = payload.clone();
+    }
+    if let Some(w) = app.get_webview_window("alert") {
+        place_alert_beside_pet(app, &w);
+        let _ = w.show();
+    }
+    let _ = app.emit("wm:alert", &payload);
+}
+
+/// 专注结束（满 50 分钟或手动停止）时，将期间拦截暂存的软提醒置为已提醒状态并推送至独立任务提示窗
+pub(crate) fn flush_focus_deferred_alert(app: &tauri::AppHandle, deferred_ids: &[i64]) {
+    if deferred_ids.is_empty() {
+        return;
+    }
+    let now = now_sec();
+    let all = crate::db::with_conn(db::repo::list_reminders).unwrap_or_default();
+    let mut items = Vec::new();
+    let mut valid_ids = Vec::new();
+    for r in all {
+        if deferred_ids.contains(&r.id) && r.status != 2 {
+            let _ = crate::db::with_conn(|c| {
+                c.execute(
+                    "UPDATE reminders SET status = 1, fired_at = COALESCE(fired_at, ?2) WHERE id = ?1",
+                    rusqlite::params![r.id, now],
+                )
+            });
+            let _ = crate::db::with_conn(|c| {
+                db::repo::log_task_event(c, Some(r.id), "reminded", None, "专注结束汇总播报")
+            });
+            let meta = crate::notify::brief_with_tz(
+                now,
+                r.fire_at,
+                r.duration_min,
+                r.priority,
+                &r.note,
+                r.tz_offset_min,
+            );
+            valid_ids.push(r.id);
+            items.push(serde_json::json!({
+                "id": r.id,
+                "title": r.title,
+                "meta": meta,
+                "priority": r.priority,
+                "kind": r.kind,
+            }));
+        }
+    }
+    if valid_ids.is_empty() {
+        return;
+    }
+    let joined: Vec<String> = items
+        .iter()
+        .filter_map(|x| x["title"].as_str().map(String::from))
+        .collect();
+    let payload = serde_json::json!({
+        "ids": valid_ids,
+        "title": joined.join(" · "),
+        "count": items.len(),
+        "level": 0,
+        "badge": format!("📬 专注期间暂存提醒 ({})", items.len()),
+        "meta": "专注已完成，以下非紧急提醒在专注期为你静音暂存",
+        "warm": "趁起来喝水走动的间隙，顺手勾掉已完成的事项吧～",
+        "items": items,
+        "focus_digest": true,
+        "tz": crate::tz::active(),
+        "ts": now,
+    });
+    push_alert_window(app, payload);
+}
+
+#[tauri::command]
+pub(crate) fn alert_current() -> serde_json::Value {
+    last_alert_cell()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+#[tauri::command]
+pub(crate) fn alert_close(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("alert") {
+        let _ = w.hide();
+    }
+}
+
+#[tauri::command]
+pub(crate) fn alert_complete(
+    app: tauri::AppHandle,
+    db: tauri::State<db::Db>,
+    ids: Vec<i64>,
+) -> Result<usize, String> {
+    let mut done_cnt = 0usize;
+    for id in &ids {
+        if db.with(|c| db::repo::set_reminder_status(c, *id, 2)).unwrap_or(false) {
+            let _ = db.with(|c| db::repo::log_task_event(c, Some(*id), "done", None, "任务提示窗完成"));
+            done_cnt += 1;
+        }
+    }
+    let _ = app.emit("wm:reminders-changed", ());
+    if done_cnt > 0 {
+        let msg = if done_cnt == 1 {
+            "✅ 已标为完成".to_string()
+        } else {
+            format!("✅ 已完成 {done_cnt} 项待办")
+        };
+        let _ = app.emit("wm:answer", &msg);
+    }
+    Ok(done_cnt)
+}
+
+#[tauri::command]
+pub(crate) fn alert_snooze(
+    app: tauri::AppHandle,
+    db: tauri::State<db::Db>,
+    ids: Vec<i64>,
+    minutes: Option<i64>,
+) -> Result<usize, String> {
+    let mins = minutes.unwrap_or(15).clamp(1, 24 * 60);
+    let defer_to = now_sec() + mins * 60;
+    let mut cnt = 0usize;
+    for id in &ids {
+        if db.with(|c| db::repo::rearm_reminder(c, *id, defer_to)).is_ok() {
+            let _ = db.with(|c| {
+                db::repo::log_task_event(
+                    c,
+                    Some(*id),
+                    "deferred",
+                    Some(mins * 60),
+                    "任务提示窗手动顺延",
+                )
+            });
+            cnt += 1;
+        }
+    }
+    let _ = app.emit("wm:reminders-changed", ());
+    if cnt > 0 {
+        let msg = format!("⏳ 已顺延 {mins} 分钟后再提醒你");
+        let _ = app.emit("wm:answer", &msg);
+    }
+    Ok(cnt)
 }
 

@@ -8,24 +8,30 @@
 
 ## ✨ Key Features
 
-### 1. 🎯 Lightweight Focus Mode & IM Interruption Analytics
+### 1. 🎯 Lightweight Focus Mode, Soft-Reminder Shield & IM Interruption Analytics
 - **One-Click 50-Minute Focus**: Right-click the desktop companion and click **`🎯 开始专注`** to start a 50-minute focus session.
 - **IM Interruption Detection**: Automatically detects when the foreground switches to an Instant Messaging app (WeChat, WeCom, Feishu/Lark, DingTalk, QQ, Slack, Telegram, etc.) during a focus session and gently reminds you via a speech bubble (`专注被打断了一次`).
+- **Focus Soft-Reminder Shield**: Automatically intercepts non-urgent reminders (`level = 0`) and overdue digests during a 50-minute focus session and defers them into a consolidated rest-time popup digest when focus ends; only high-priority hard reminders (`level = 1`, e.g., upcoming meetings) penetrate immediately.
 - **50-Minute Rest & Hydration Prompt**: Upon completing a 50-minute focus session, WorkMate prompts you to stand up, stretch, and drink water. You can then manually start the next focus round whenever ready.
 - **14-Day Interruption Trend**: Periodically tracks daily focus interruptions and analyzes whether your recent interruption frequency is **rising (`↑`)**, **falling (`↓`)**, or **stable (`→`)**.
 
-### 2. 📊 Vertical Color-Coded Time-Series Activity Chart
+### 2. 🔔 Independent Task Reminder Popup & Adaptive Speech Bubble
+- **Dedicated Task Alert Window (`alert`)**: Due tasks and end-of-focus deferred digests pop up in a dedicated, non-focus-stealing card (`focus: false`) beside the desktop pet, featuring spacious **`✅ 完成`**, **`⏳ +15分钟`**, **`⏳ +1小时`**, and **`📋 面板`** controls without crowding the pet bubble or right-click menu.
+- **Bounded Adaptive Speech Bubble**: Dynamically sizes to fit short one-liners or multi-line explanations (`124–256px` width, `auto` height up to `188px`), with hover-to-pause reading and proportional display duration.
+- **Configurable Streaming Output (`SSE`)**: Optional real-time streaming output in `LLM API → 偏好`, featuring a stateful **`StreamThinkFilter`** that automatically strips `<think>...</think>` blocks and `reasoning_content` deltas so reasoning chains never bloat the bubble.
+
+### 3. 📊 Vertical Color-Coded Time-Series Activity Chart
 - **Privacy-First Perception**: Samples keyboard/mouse idle seconds and foreground application category every 5 seconds. **Never records window titles, screen captures, or keystrokes.**
 - **Compact Vertical Time-Series UI**: Displays today's work blocks using a semantic **color legend** (`IDE / 编码`, `AI Agent`, `办公 / 文档`, `浏览器`, `会议`, `即时通讯`, `媒体`, `其他`) paired with a compact **vertical hourly time-series chart** (`00–60 min` proportional colored segments per active hour), avoiding long, repetitive text logs.
 
-### 3. 🌏 City-Driven Timezone Engine & Smart Todo / Trip Extraction
+### 4. 🌏 City-Driven Timezone Engine & Smart Todo / Trip Extraction
 - **Unified City Timezone Anchor**: Resolves timezone automatically from your current/home city (defaulting to China Standard Time `UTC+8` when unconfigured).
 - **Cross-Timezone Consistency**: Whether your host OS is set to US time or another timezone, natural language time expressions (`明天早晨`, `明天中午`, `今晚8点`, `下周三下午3点`) are parsed and booked in your active city's timezone, and automatically converted when delivering reminders across timezones.
 - **Clipboard Scene Understanding**:
   - `Ctrl+Shift+Space`: Ask LLM about the selected/copied text in context.
   - `Ctrl+Shift+T`: Extract actionable todos or multi-step business trip itineraries from copied chat/email text.
 
-### 4. ⚡ Non-Blocking Async Architecture & Local Security
+### 5. ⚡ Non-Blocking Async Architecture & Local Security
 - **Zero UI Freezing**: All LLM network requests, geolocation lookups, and SQLite aggregations run on Tauri's background thread pool (`tauri::async_runtime::spawn_blocking`), keeping the Win32 UI thread responsive at all times.
 - **Local-Only Storage & DPAPI Encryption**:
   - Data is stored locally in SQLite (`WAL` mode) with 5-minute rollups (`rollup_5m`) and layered memory (`short` / `mid` / `long`).

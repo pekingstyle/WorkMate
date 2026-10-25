@@ -118,6 +118,9 @@ pub(crate) fn apply_presenting(app: &tauri::AppHandle) {
         return;
     };
     if on {
+        if let Some(a) = app.get_webview_window("alert") {
+            let _ = a.hide();
+        }
         if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
             PET_HIDDEN_BY_PRESENT.store(true, Ordering::Relaxed);
@@ -149,6 +152,7 @@ fn spawn_perception(app: tauri::AppHandle) {
         //   away_since  —— 类别切走了多久（宽限期内切回来不算断）
         let mut streak_cat: Option<perception::AppCategory> = None;
         let mut away_since: Option<i64> = None;
+        let mut passive_im_episode = false;
 
         loop {
             std::thread::sleep(Duration::from_secs(5));
@@ -157,10 +161,10 @@ fn spawn_perception(app: tauri::AppHandle) {
             // 单拍最多计 30 秒：机器休眠/进程挂起后，两拍之间的墙钟间隔可能是几小时，
             // 直接累加会让「连续专注」凭空跳几十分钟（实测踩过）。
             let delta = (snap.ts - last_ts).clamp(0, 30) as u32;
-            // 打断判定：只有「已经专注满 5 分钟」的一段被切断才算一次打断。
-            // 门槛放在这里是刻意的——刚敲两行就被消息带走不算打断，
-            // 否则一天能记几百次，数字没有任何意义。
+            // 打断判定：只有「已经专注满 5 分钟（非 IM）」的一段工作被即时通讯（IM）切入打断，
+            // 才算一次被动专注打断；单纯停手阅读 60 秒或 IDE↔浏览器查资料不算打断。
             let streak_before = streak_secs;
+            let cat_before = streak_cat;
             // 前台是 WorkMate 自己（用户正在看面板）：这一拍不记账、不累加、不判打断。
             // 否则「看统计」的几分钟会凭空变成「其他」，把真实类别挤下去；
             // 深度专注中打开面板还会被误判成被打断。
@@ -176,7 +180,11 @@ fn spawn_perception(app: tauri::AppHandle) {
                     streak_secs = 0;
                     streak_cat = None;
                     away_since = None;
+                    passive_im_episode = false;
                 } else {
+                    if snap.app_cat != perception::AppCategory::Im {
+                        passive_im_episode = false;
+                    }
                     match streak_cat {
                         None => {
                             streak_cat = Some(snap.app_cat);
@@ -200,7 +208,15 @@ fn spawn_perception(app: tauri::AppHandle) {
                     }
                 }
             }
-            let interrupted = !self_window && streak_before >= 300 && streak_secs == 0;
+            let interrupted_by_im = !self_window
+                && snap.idle_s < 60
+                && snap.app_cat == perception::AppCategory::Im
+                && cat_before != Some(perception::AppCategory::Im)
+                && streak_before >= 300
+                && !passive_im_episode;
+            if interrupted_by_im {
+                passive_im_episode = true;
+            }
             snap.focus_min = streak_secs / 60;
             last_ts = snap.ts;
 
@@ -216,16 +232,19 @@ fn spawn_perception(app: tauri::AppHandle) {
                 .map(|e| e.kind == "im_interrupted")
                 .unwrap_or(false);
 
-            if interrupted && !manual_im_counted {
+            if interrupted_by_im && !manual_im_counted {
                 let day = logs::bj_date(snap.ts);
                 let db = app.state::<db::Db>();
                 if let Ok(n) = db.with(|c| db::repo::bump_interrupt(c, &day)) {
-                    startup_log(&format!("focus interrupted #{n} on {day}"));
+                    startup_log(&format!("focus interrupted by IM #{n} on {day}"));
                 }
             }
             if let Some(ref ev) = focus_ev {
                 startup_log(&format!("focus session event: {} ({})", ev.kind, ev.message));
                 let _ = app.emit("wm:focus", ev);
+                if !ev.deferred_ids.is_empty() {
+                    commands::flush_focus_deferred_alert(&app, &ev.deferred_ids);
+                }
             }
 
             let db = app.state::<db::Db>();
@@ -249,9 +268,10 @@ fn spawn_perception(app: tauri::AppHandle) {
             apply_presenting(&app);
 
             // 喝水 / 站起：把「连续专注」转成一条普通提醒，走同一条提醒管线。
-            // 好处是自动继承静默时段、会议避让、打扰预算与合并逻辑——
-            // 否则三套提醒各喊各的，用户体验就是噪音（需求第 4 点）。
-            maybe_schedule_body_reminders(&app, snap.focus_min as i64);
+            // 当用户正处于手动开启的 50 分钟专注模式时不重复调度（50 分钟完成自带休息喝水提示）。
+            if !focus::is_active() {
+                maybe_schedule_body_reminders(&app, snap.focus_min as i64);
+            }
 
             // 推给前端（面板实时刷新 / 后续情绪引擎订阅）
             let payload = serde_json::json!({
@@ -293,6 +313,10 @@ fn spawn_perception(app: tauri::AppHandle) {
 /// 用户在用电脑这个条件很重要：如果他不在，气泡几秒就淡出，
 /// 却已经把「今天发过」的标记写下了，等于白丢一次。
 fn maybe_overdue_digest(app: &tauri::AppHandle, db: &db::Db, now: i64) {
+    // 50 分钟专注期间自动屏蔽逾期摘要，顺延到专注结束后再提醒
+    if focus::is_active() {
+        return;
+    }
     let today = logs::bj_date(now);
 
     // 今天发过就跳过。这一条查询挡掉绝大多数调用（每 5 秒一次）。
@@ -333,12 +357,12 @@ fn maybe_overdue_digest(app: &tauri::AppHandle, db: &db::Db, now: i64) {
         return;
     }
 
-    // 最久的那件：按 fired_at 升序取第一条
+    // 最久的那件：按 fired_at 升序取第一条（仅真实待办 kind = 0）
     let oldest = db
         .with(|c| {
             c.query_row(
                 "SELECT title, fired_at FROM reminders
-                 WHERE status = 1 AND fired_at IS NOT NULL
+                 WHERE kind = 0 AND status = 1 AND fired_at IS NOT NULL
                  ORDER BY fired_at ASC LIMIT 1",
                 [],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
@@ -354,19 +378,46 @@ fn maybe_overdue_digest(app: &tauri::AppHandle, db: &db::Db, now: i64) {
         None => String::new(),
     };
 
-    let _ = app.emit(
-        "wm:reminder",
-        serde_json::json!({
-            "ids": [],
-            "title": format!("有 {overdue} 件事逾期了"),
-            "count": overdue,
-            "level": 0,
-            "kinds": [],
-            "meta": meta,
-            "warm": "挑最小的一件先做掉，比全做完更现实。",
-            "digest": true,
-        }),
-    );
+    let all_reminders = db.with(db::repo::list_reminders).unwrap_or_default();
+    let mut overdue_ids = Vec::new();
+    let mut overdue_items = Vec::new();
+    for r in all_reminders {
+        if r.status == 1 && r.kind == 0 {
+            overdue_ids.push(r.id);
+            let item_meta = notify::brief_with_tz(
+                now,
+                r.fire_at,
+                r.duration_min,
+                r.priority,
+                &r.note,
+                r.tz_offset_min,
+            );
+            overdue_items.push(serde_json::json!({
+                "id": r.id,
+                "title": r.title,
+                "meta": item_meta,
+                "priority": r.priority,
+                "kind": r.kind,
+            }));
+        }
+    }
+
+    let payload = serde_json::json!({
+        "ids": overdue_ids,
+        "title": format!("有 {overdue} 件事逾期了"),
+        "count": overdue,
+        "level": 0,
+        "kinds": [],
+        "badge": format!("⏰ 逾期事项摘要 ({overdue})"),
+        "meta": meta,
+        "warm": "挑最小的一件先做掉，比全做完更现实。",
+        "items": overdue_items,
+        "digest": true,
+        "tz": tz::active(),
+        "ts": now,
+    });
+    let _ = app.emit("wm:reminder", &payload);
+    commands::push_alert_window(app, payload);
     let _ = db.with(|c| db::repo::set_setting(c, "remind.digest_day", &today));
     startup_log(&format!("reminder: overdue digest sent ({overdue} items)"));
 }
@@ -413,8 +464,11 @@ fn spawn_reminder_watcher(app: tauri::AppHandle) {
 
         // 开会时不弹软提醒（硬提醒是用户明确要求的，照弹）
         let meeting = perception::current_category() == perception::AppCategory::Meeting;
-        let soft_ok = notify::soft_allowed() && !meeting;
-        let defer_to = if notify::quiet_hours() {
+        let in_focus = focus::is_active();
+        let soft_ok = notify::soft_allowed() && !meeting && !in_focus;
+        let defer_to = if in_focus {
+            focus::estimated_end_ts(now)
+        } else if notify::quiet_hours() {
             now + notify::quiet_remaining().max(60)
         } else {
             now + notify::DEFER_SECS
@@ -422,6 +476,30 @@ fn spawn_reminder_watcher(app: tauri::AppHandle) {
 
         let mut deliver = Vec::new();
         for r in due {
+            // 50 分钟专注期间：自动拦截所有 level == 0 的非紧急提醒，顺延到本轮专注结束后合并播报；
+            // 仅 level == 1 的高优硬提醒/明确日程允许穿透。
+            if in_focus && r.level == 0 {
+                if r.kind == 1 || r.kind == 2 {
+                    // 自动喝水/站起提醒在手动 50 分钟专注期间直接静默消化（专注结束自带休息喝水提示）
+                    let _ = db.with(|c| db::repo::set_reminder_status(c, r.id, 2));
+                } else {
+                    focus::note_deferred_reminder(r.id, &r.title);
+                    if let Err(e) = db.with(|c| db::repo::rearm_reminder(c, r.id, defer_to)) {
+                        eprintln!("[workmate] rearm in focus failed: {e}");
+                    }
+                    let _ = db.with(|c| {
+                        db::repo::log_task_event(
+                            c,
+                            Some(r.id),
+                            "deferred",
+                            Some((defer_to - now).max(60)),
+                            "50分钟专注期自动拦截顺延",
+                        )
+                    });
+                }
+                continue;
+            }
+
             if r.level == 0 && !soft_ok {
                 if let Err(e) = db.with(|c| db::repo::rearm_reminder(c, r.id, defer_to)) {
                     eprintln!("[workmate] rearm failed: {e}");
@@ -463,7 +541,13 @@ fn spawn_reminder_watcher(app: tauri::AppHandle) {
             }
 
             deliver.push(r.clone());
-            let _ = db.with(|c| db::repo::log_task_event(c, Some(r.id), "reminded", None, ""));
+            // 自动喝水/站起轻提醒（kind != 0）一经投递即自动标为完成（保留 fired_at 供当日喝水/站起次数统计），
+            // 避免留在待办列表里或 30 分钟后被误算进「逾期待办」。
+            if r.kind != 0 {
+                let _ = db.with(|c| db::repo::set_reminder_status(c, r.id, 2));
+            } else {
+                let _ = db.with(|c| db::repo::log_task_event(c, Some(r.id), "reminded", None, ""));
+            }
         }
         if deliver.is_empty() {
             continue;
@@ -493,6 +577,26 @@ fn spawn_reminder_watcher(app: tauri::AppHandle) {
         let ids: Vec<i64> = deliver.iter().map(|r| r.id).collect();
         let level = deliver.iter().map(|r| r.level).max().unwrap_or(1);
         let kinds: Vec<i64> = deliver.iter().map(|r| r.kind).collect();
+        let items: Vec<serde_json::Value> = deliver
+            .iter()
+            .map(|r| {
+                let item_meta = notify::brief_with_tz(
+                    now,
+                    r.fire_at,
+                    r.duration_min,
+                    r.priority,
+                    &r.note,
+                    r.tz_offset_min,
+                );
+                serde_json::json!({
+                    "id": r.id,
+                    "title": r.title,
+                    "meta": item_meta,
+                    "priority": r.priority,
+                    "kind": r.kind,
+                })
+            })
+            .collect();
 
         println!("[workmate] reminder due: {:?} {}", ids, joined);
         // 留一份"最后一次投递"的原始结果：自动化断言不该依赖气泡何时淡出。
@@ -509,19 +613,31 @@ fn spawn_reminder_watcher(app: tauri::AppHandle) {
         // 有没有熬夜）挑一句话。规则生成，不额外调模型——提醒是实时路径，
         // 多等一秒体感就很差；模型的产出是每天日记里留下的 care。
         let warm = memory::warm_hint();
-        let _ = app.emit(
-            "wm:reminder",
-            serde_json::json!({
-                "ids": ids,
-                "title": joined,
-                "count": titles.len(),
-                "level": level,
-                "kinds": kinds,
-                "meta": meta,
-                "warm": warm,
-                "tz": tz::active(),
-            }),
-        );
+        let badge = if in_focus && level == 1 {
+            "⚡ 专注期高优穿透提醒".to_string()
+        } else if level == 1 {
+            "🔔 重要待办 / 日程到点".to_string()
+        } else {
+            "🔔 待办提醒".to_string()
+        };
+        let payload = serde_json::json!({
+            "ids": ids,
+            "title": joined,
+            "count": titles.len(),
+            "level": level,
+            "kinds": kinds,
+            "badge": badge,
+            "meta": meta,
+            "warm": warm,
+            "items": items,
+            "tz": tz::active(),
+            "ts": now,
+        });
+        let _ = app.emit("wm:reminder", &payload);
+        // 仅真实待办事项（含至少一条 kind == 0）弹出独立任务提示窗；纯喝水/站起轻提醒只走宠物气泡
+        if kinds.iter().any(|k| *k == 0) {
+            commands::push_alert_window(&app, payload);
+        }
         // 只有软提醒计入预算（硬提醒是用户自己的约定，不该被额度限制）
         if level == 0 {
             notify::note_interrupt();
@@ -863,12 +979,12 @@ fn main() {
                     save_state_throttled(window.app_handle());
                 }
             }
-            // 面板关闭 = 隐藏，窗口常驻。否则窗口被销毁后再打开就没有窗口可显示了。
-            "panel" => {
+            // 面板/任务提示弹出窗关闭 = 隐藏，窗口常驻。否则窗口被销毁后再打开就没有窗口可显示了。
+            "panel" | "alert" => {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     let _ = window.hide();
                     api.prevent_close();
-                    startup_log("panel hidden (prevent_close)");
+                    startup_log(&format!("{} hidden (prevent_close)", window.label()));
                 }
             }
             _ => {}
@@ -935,7 +1051,11 @@ fn main() {
             commands::workload_brief,
             commands::focus_status,
             commands::focus_start,
-            commands::focus_stop
+            commands::focus_stop,
+            commands::alert_current,
+            commands::alert_close,
+            commands::alert_complete,
+            commands::alert_snooze
         ])
         .setup(|app| {
             startup_log("setup begin");

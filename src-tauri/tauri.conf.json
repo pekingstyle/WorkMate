@@ -15,8 +15,8 @@
         "label": "pet",
         "title": "WorkMate",
         "url": "index.html",
-        "width": 220,
-        "height": 250,
+        "width": 280,
+        "height": 360,
         "resizable": false,
         "transparent": true,
         "decorations": false,
@@ -33,6 +33,22 @@
         "width": 460,
         "height": 680,
         "visible": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu-sandbox --noerrdialogs"
+      },
+      {
+        "label": "alert",
+        "title": "WorkMate · 任务提示",
+        "url": "alert.html",
+        "width": 336,
+        "height": 236,
+        "resizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "visible": false,
+        "shadow": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu-sandbox --noerrdialogs"
       }
     ],

@@ -342,6 +342,7 @@ interface LlmView {
   has_key: boolean;
   key_masked: string;
   enabled: boolean;
+  stream?: boolean;
 }
 
 function setLlmStatus(msg: string, cls = ""): void {
@@ -365,6 +366,10 @@ async function loadLlmConfig(force = false): Promise<void> {
   const v = await invokeCmd<LlmView>("get_llm_config");
   if (!v) return;
   const keyEl = $("llm-key") as HTMLInputElement;
+  const streamEl = document.getElementById("opt-stream") as HTMLInputElement | null;
+  if (streamEl && typeof v.stream === "boolean") {
+    streamEl.checked = v.stream;
+  }
   const editing =
     llmDirty || llmInputs.some((id) => document.activeElement === $(id));
   if (force || !editing) {
@@ -380,10 +385,12 @@ $("llm-save").addEventListener("click", async () => {
   const base = ($("llm-base") as HTMLInputElement).value;
   const model = ($("llm-model") as HTMLInputElement).value;
   const key = ($("llm-key") as HTMLInputElement).value;
+  const streamEl = document.getElementById("opt-stream") as HTMLInputElement | null;
   const v = await invokeCmd<LlmView>("save_llm_config", {
     baseUrl: base,
     model,
     apiKey: key,
+    stream: streamEl ? streamEl.checked : true,
   });
   if (v) {
     llmDirty = false;
@@ -617,12 +624,12 @@ interface FocusStatusView {
   target_secs: number;
   im_interrupts: number;
   trend?: {
-    today_interrupts: number;
+    today_count: number;
+    yesterday_count?: number;
     recent_avg: number;
     prev_avg: number;
     direction: string;
-    direction_label: string;
-    sample_days: number;
+    delta_pct?: number;
     summary: string;
   };
 }
@@ -635,7 +642,7 @@ async function refreshFocusStatus(): Promise<void> {
   panelFocusActive = Boolean(fst.active);
   const trendEl = $("td-intr-trend");
   const btn = $("btn-focus-toggle") as HTMLButtonElement | null;
-  const trendText = fst.trend?.summary || `今日被打断 ${fst.trend?.today_interrupts ?? 0} 次`;
+  const trendText = fst.trend?.summary || `今日被打断 ${fst.trend?.today_count ?? 0} 次`;
   if (fst.active) {
     const mins = Math.floor((fst.active_secs || 0) / 60);
     const targetMins = Math.floor((fst.target_secs || 3000) / 60);
@@ -704,7 +711,22 @@ async function refreshToday(): Promise<void> {
   await refreshBlocks();
 }
 
-/* ------------------------------ 偏好：低功耗模式 ------------------------------ */
+/* ------------------------------ 偏好：流式输出 & 低功耗模式 ------------------------------ */
+
+const streamToggle = document.getElementById("opt-stream") as HTMLInputElement | null;
+streamToggle?.addEventListener("change", async () => {
+  const base = ($("llm-base") as HTMLInputElement).value;
+  const model = ($("llm-model") as HTMLInputElement).value;
+  const v = await invokeCmd<LlmView>("save_llm_config", {
+    baseUrl: base,
+    model,
+    apiKey: "",
+    stream: streamToggle.checked,
+  });
+  if (v) {
+    toast(streamToggle.checked ? "已开启流式输出（自动隐藏思考过程）" : "已切换为完整生成后一次性输出");
+  }
+});
 
 const lpToggle = $("opt-lowpower") as HTMLInputElement;
 
@@ -974,6 +996,12 @@ if (inTauri) {
     });
     void listen("wm:focus", () => {
       void refreshFocusStatus();
+      void refreshBrief();
+    });
+    void listen("wm:reminders-changed", () => {
+      void refreshReminders();
+      void refreshToday();
+      void refreshBrief();
     });
   });
 }
@@ -1137,28 +1165,28 @@ interface Risk {
 interface Brief {
   habits: {
     samples: number;
-    avg_start: string;
-    avg_end: string;
-    avg_active_min: number;
-    top_categories: { cat: string; share_pct: number }[];
+    avg_start?: string;
+    avg_end?: string;
+    avg_active_min?: number;
+    top_categories?: { cat_id?: number; cat: string; share_pct: number }[];
     interrupt_trend?: {
-      today_interrupts: number;
+      today_count: number;
+      yesterday_count?: number;
       recent_avg: number;
       prev_avg: number;
       direction: string;
-      direction_label: string;
-      sample_days: number;
+      delta_pct?: number;
       summary: string;
     };
   };
-  tasks: {
-    open: number;
-    overdue: number;
-    deferred: number;
-    done_7d: number;
-    avg_response_min: number | null;
+  tasks?: {
+    open?: number;
+    overdue?: number;
+    deferred?: number;
+    done_7d?: number;
+    avg_response_min?: number | null;
   };
-  risks: Risk[];
+  risks?: Risk[];
 }
 interface AskResult {
   intent: string;
@@ -1206,22 +1234,57 @@ async function refreshBrief(): Promise<void> {
   const b = await invokeCmd<Brief>("memory_brief", { days: 14, tripDays: 120 });
   if (!b) return;
   const h = b.habits ?? ({} as Brief["habits"]);
-  $("hb-samples").textContent = h.samples ? `${h.samples} 天` : "—";
-  $("hb-span").textContent = h.samples ? `${h.avg_start} → ${h.avg_end}` : "—";
-  $("hb-active").textContent = h.samples ? `${h.avg_active_min} 分钟` : "—";
-  $("hb-cats").textContent = (h.top_categories ?? [])
-    .map((c) => `${c.cat} ${c.share_pct}%`)
-    .join("、");
+  const samples = h.samples ?? 0;
+  $("hb-samples").textContent = samples > 0 ? `${samples} 天` : "—";
+  $("hb-span").textContent =
+    samples > 0 && h.avg_start && h.avg_end ? `${h.avg_start} → ${h.avg_end}` : "—";
+  const activeMin = h.avg_active_min ?? 0;
+  $("hb-active").textContent = samples > 0 ? `${activeMin} 分钟` : "—";
+
+  const cats = h.top_categories ?? [];
+  const catsEl = $("hb-cats");
+  if (!cats.length) {
+    catsEl.innerHTML = '<span class="hb-chip">暂无分类记录</span>';
+  } else {
+    catsEl.innerHTML = cats
+      .map((c) => {
+        const col = (c.cat_id != null ? CAT_COLOR[c.cat_id] : undefined) ?? "#64748B";
+        return `<span class="hb-chip"><i style="background:${col}"></i>${escapeHtml(c.cat)} <b>${c.share_pct ?? 0}%</b></span>`;
+      })
+      .join("");
+  }
+
   const intrEl = $("hb-intr-trend");
   if (intrEl) {
-    intrEl.textContent = h.interrupt_trend?.summary || "暂无样本";
+    const tr = h.interrupt_trend;
+    const dir = tr?.direction ?? "new";
+    const tagMap: Record<string, { cls: string; text: string }> = {
+      up: { cls: "up", text: "📈 上升" },
+      down: { cls: "down", text: "📉 下降" },
+      flat: { cls: "", text: "➡️ 持平" },
+      new: { cls: "", text: "🌱 积累中" },
+    };
+    const tag = tagMap[dir] ?? tagMap.new;
+    const summary = tr?.summary || "暂无样本";
+    intrEl.innerHTML = `<span class="hb-trend-tag ${tag.cls}">${tag.text}</span><span>${escapeHtml(summary)}</span>`;
   }
-  const t = b.tasks ?? ({} as Brief["tasks"]);
-  $("hb-tasks").textContent = t
-    ? `未完成 ${t.open} · 逾期 ${t.overdue} · 顺延 ${t.deferred} · 近 7 天完成 ${t.done_7d}${
-        t.avg_response_min != null ? ` · 平均响应 ${t.avg_response_min} 分钟` : ""
-      }`
-    : "—";
+
+  const t = b.tasks ?? {};
+  const openCnt = t.open ?? 0;
+  const overdueCnt = t.overdue ?? 0;
+  const deferredCnt = t.deferred ?? 0;
+  const done7dCnt = t.done_7d ?? 0;
+  const avgResp = t.avg_response_min;
+  const taskChips: string[] = [
+    `<span class="hb-chip">未完成 <b>${openCnt}</b></span>`,
+    `<span class="hb-chip${overdueCnt > 0 ? " warn" : ""}">逾期 <b>${overdueCnt}</b></span>`,
+    `<span class="hb-chip">顺延 <b>${deferredCnt}</b></span>`,
+    `<span class="hb-chip${done7dCnt > 0 ? " ok" : ""}">近 7 天完成 <b>${done7dCnt}</b></span>`,
+  ];
+  if (avgResp != null) {
+    taskChips.push(`<span class="hb-chip">平均响应 <b>${avgResp} 分钟</b></span>`);
+  }
+  $("hb-tasks").innerHTML = taskChips.join("");
 
   const risks = b.risks ?? [];
   $("risk-list").innerHTML = risks.length

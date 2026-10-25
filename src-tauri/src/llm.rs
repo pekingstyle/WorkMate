@@ -19,7 +19,11 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_stream_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmFile {
     #[serde(default)]
     pub base_url: String,
@@ -28,6 +32,20 @@ pub struct LlmFile {
     /// base64(DPAPI(api_key))，绝不明文落盘
     #[serde(default)]
     pub key_cipher: String,
+    /// 是否开启流式输出（边生成边展示，自动过滤 <think> 思考过程；默认开启）
+    #[serde(default = "default_stream_true")]
+    pub stream: bool,
+}
+
+impl Default for LlmFile {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            model: String::new(),
+            key_cipher: String::new(),
+            stream: true,
+        }
+    }
 }
 
 /// 返回给前端的视图对象：**不含明文 key**
@@ -38,6 +56,7 @@ pub struct LlmView {
     pub has_key: bool,
     pub key_masked: String,
     pub enabled: bool,
+    pub stream: bool,
 }
 
 /// 配置文件路径。
@@ -162,6 +181,7 @@ pub fn to_view(f: &LlmFile) -> LlmView {
         has_key: key.is_some(),
         key_masked: masked,
         enabled: !f.base_url.is_empty() && !f.model.is_empty() && key.is_some(),
+        stream: f.stream,
     }
 }
 
@@ -1765,6 +1785,7 @@ mod tests {
             base_url: " \"https://api.deepseek.com/\" ".into(),
             model: "deepseek-chat".into(),
             key_cipher: String::new(),
+            stream: true,
         };
         let urls = candidate_endpoints(&f_root).unwrap();
         assert_eq!(urls[0], "https://api.deepseek.com/v1/chat/completions");
@@ -1774,6 +1795,7 @@ mod tests {
             base_url: "https://token.sensenova.cn/v1".into(),
             model: "sensenova-6.8-flash-lite".into(),
             key_cipher: String::new(),
+            stream: true,
         };
         let urls_v1 = candidate_endpoints(&f_v1).unwrap();
         assert_eq!(urls_v1, vec!["https://token.sensenova.cn/v1/chat/completions"]);
@@ -1782,6 +1804,7 @@ mod tests {
             base_url: "http://127.0.0.1:11434/v1/models".into(),
             model: "qwen3".into(),
             key_cipher: String::new(),
+            stream: true,
         };
         assert_eq!(
             endpoint(&f_models).unwrap(),
@@ -1848,6 +1871,40 @@ mod tests {
             "question"
         );
         assert_eq!(detect_scene("   ").0, "empty");
+    }
+
+    #[test]
+    fn stream_think_filter_strips_split_think_tags_and_reasoning() {
+        let mut f = StreamThinkFilter::new();
+
+        // 1) 首包只收到半截 "<thi"
+        let (p1, v1) = f.push_delta("", "<thi");
+        assert_eq!(p1, "thinking");
+        assert!(v1.is_empty());
+
+        // 2) 后续包进入思考内部
+        let (p2, v2) = f.push_delta("", "nk>先一步步推导久期公式...");
+        assert_eq!(p2, "thinking");
+        assert!(v2.is_empty());
+
+        // 3) 闭合标签 "</think>" 也跨了两个包
+        let (p3, v3) = f.push_delta("", "继续推导</th");
+        assert_eq!(p3, "thinking");
+        assert!(v3.is_empty());
+
+        let (p4, v4) = f.push_delta("", "ink>\n\n久期衡量债券价格对利率变动的敏感度。");
+        assert_eq!(p4, "streaming");
+        assert_eq!(v4, "久期衡量债券价格对利率变动的敏感度。");
+        assert_eq!(f.finish(), "久期衡量债券价格对利率变动的敏感度。");
+
+        // 4) DeepSeek 风格独立 reasoning_content 字段
+        let mut f2 = StreamThinkFilter::new();
+        let (rp1, rv1) = f2.push_delta("正在思考中...", "");
+        assert_eq!(rp1, "thinking");
+        assert!(rv1.is_empty());
+        let (rp2, rv2) = f2.push_delta("", "直接给出答案");
+        assert_eq!(rp2, "streaming");
+        assert_eq!(rv2, "直接给出答案");
     }
 }
 
@@ -2022,16 +2079,377 @@ fn record(mode: Mode, model: &str, started: std::time::Instant, res: &Result<Str
     }
 }
 
-/// 面向「剪贴板交互」的场景化问答：
-/// WorkMate 不侵入外部应用，用户选中复制一段文本就是把当前面临的处境交给助手。
-/// 这里把「识别出的场景（问题解答 / 待办交办 / 出差行程）」与「用户此刻的工作负载事实」
-/// 一起注入系统提示词，让回答能直接衔接待办与工作负载。
-pub fn chat_clipboard_scene(
+/// 流式 `<think>` / `reasoning_content` 实时净滤状态机。
+///
+/// 解决问题：
+///   1) 推理模型在流式输出时可能先通过 `delta.reasoning_content` 或 `<think>...</think>` 吐出几百字思考链；
+///   2) `<think>` 或 `</think>` 标签经常被切碎在两个相邻的 SSE chunk 中（如 chunk1=`"<thi"`, chunk2=`"nk>"`）；
+///   3) 若直接把原始流推给前端，桌宠气泡会被思考过程撑大并暴露冗余推理独白。
+///
+/// 本状态机累积原始流并实时剥离思考块：
+///   - 思考阶段返回 `phase = "thinking"`, `visible = ""`（前端仅展示单行 `💭 正在思考…`）；
+///   - 正文阶段返回 `phase = "streaming"`, `visible = "<干净正文>"`。
+#[derive(Debug, Default, Clone)]
+pub struct StreamThinkFilter {
+    raw_content: String,
+    pub saw_reasoning: bool,
+}
+
+impl StreamThinkFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 喂入一个 SSE delta 的 `reasoning_content`（如果有）与 `content`（如果有），
+    /// 返回 `(phase, visible_text)`，其中 `phase` 为 `"thinking"` 或 `"streaming"`。
+    pub fn push_delta(&mut self, reasoning_delta: &str, content_delta: &str) -> (&'static str, String) {
+        if !reasoning_delta.is_empty() {
+            self.saw_reasoning = true;
+        }
+        if !content_delta.is_empty() {
+            self.raw_content.push_str(content_delta);
+        }
+
+        let (visible, in_think, had_inline_think) = Self::extract_visible(&self.raw_content);
+        if had_inline_think {
+            self.saw_reasoning = true;
+        }
+        if in_think || (visible.is_empty() && self.saw_reasoning) {
+            ("thinking", visible)
+        } else {
+            ("streaming", visible)
+        }
+    }
+
+    /// 流结束时获取最终干净正文
+    pub fn finish(&self) -> String {
+        let (visible, _, _) = Self::extract_visible(&self.raw_content);
+        visible.trim().to_string()
+    }
+
+    /// 从累积的 `raw_content` 中剥离已闭合的 `<think>...</think>`、遮蔽未闭合的 `<think>...` 以及末尾半截标签前缀。
+    /// 返回 `(visible_text, is_currently_inside_think, saw_any_think_tag)`。
+    fn extract_visible(raw: &str) -> (String, bool, bool) {
+        let mut text = raw.to_string();
+        let mut saw_think = false;
+        let mut in_unclosed_think = false;
+
+        for (open_tag, close_tag) in [("<think>", "</think>"), ("<thinking>", "</thinking>")] {
+            loop {
+                let lower = text.to_ascii_lowercase();
+                let Some(start) = lower.find(open_tag) else {
+                    break;
+                };
+                saw_think = true;
+                let after_open = start + open_tag.len();
+                if let Some(rel_end) = lower[after_open..].find(close_tag) {
+                    let close_end = after_open + rel_end + close_tag.len();
+                    text = format!("{}{}", &text[..start], &text[close_end..]);
+                } else {
+                    // 处于尚未闭合的 <think> 块内部：截掉 <think> 及其后面的思考内容
+                    text = text[..start].to_string();
+                    in_unclosed_think = true;
+                    break;
+                }
+            }
+        }
+
+        // 检查开头或末尾是否正好是半截 "<think>" / "<thinking>" 的前缀（例如首包只到了 "<thi"）
+        let trimmed_start = text.trim_start();
+        let lower_trim = trimmed_start.to_ascii_lowercase();
+        for tag in ["<thinking>", "<think>"] {
+            if !lower_trim.is_empty()
+                && lower_trim.len() < tag.len()
+                && tag.starts_with(&lower_trim)
+            {
+                return (String::new(), true, true);
+            }
+        }
+
+        let visible = trimmed_start.to_string();
+        (visible, in_unclosed_think, saw_think)
+    }
+}
+
+/// 发送流式 `/chat/completions` 请求（`stream: true`），实时通过 `StreamThinkFilter` 净滤思考过程并回调 `on_progress`。
+/// 若网关不支持 SSE 而直接返回了普通 JSON，也能透明兼容解析。
+pub fn post_chat_stream<F>(
+    f: &LlmFile,
+    mut body: serde_json::Value,
+    timeout_secs: u64,
+    model_hint: &str,
+    mut on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str, &str),
+{
+    use std::io::{BufRead, BufReader};
+
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("stream".to_string(), serde_json::Value::Bool(true));
+    }
+
+    let key = api_key(f)
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .ok_or("尚未配置 API Key")?;
+    let urls = candidate_endpoints(f)?;
+    let mut url_idx = 0usize;
+    let mut cur_body = body;
+    let mut downgraded_400 = false;
+    let mut tried_direct_bypass = false;
+
+    for attempt in 0..4u32 {
+        let url = &urls[url_idx];
+        let use_direct = tried_direct_bypass || should_bypass_tun(url);
+        let agent = if use_direct {
+            direct_nic_agent()
+        } else {
+            normal_agent()
+        };
+        let resp = agent
+            .post(url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Content-Type", "application/json")
+            .set("Accept", "text/event-stream, application/json")
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .send_json(cur_body.clone());
+
+        match resp {
+            Ok(r) => {
+                if tried_direct_bypass {
+                    mark_bypass_tun(url);
+                }
+                let content_type = r.header("content-type").unwrap_or("").to_ascii_lowercase();
+                // 兼容部分网关忽略 stream:true 直接返回 application/json 的情况
+                if content_type.contains("application/json") && !content_type.contains("event-stream") {
+                    let text = r.into_string().map_err(|e| e.to_string())?;
+                    let v: serde_json::Value = serde_json::from_str(&text)
+                        .map_err(|_| format!("响应不是 JSON：{}", truncate(&text)))?;
+                    let u = usage_of(&v);
+                    track_usage(u.prompt_tokens, u.completion_tokens, true);
+                    let picked = pick_message_ex(&v, model_hint);
+                    if !picked.content.is_empty() {
+                        on_progress("done", &picked.content);
+                        return Ok(picked.content);
+                    }
+                    return Err("模型返回了空内容".into());
+                }
+
+                let reader = BufReader::new(r.into_reader());
+                let mut filter = StreamThinkFilter::new();
+                let mut usage = Usage::default();
+                let mut last_emit = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap_or_else(std::time::Instant::now);
+                let mut notified_thinking = false;
+                let mut raw_non_sse = String::new();
+
+                for line_res in reader.lines() {
+                    let line = match line_res {
+                        Ok(l) => l,
+                        Err(e) => {
+                            // 若已经收到了有效正文，网络尾包断开时直接返回已有正文
+                            let cur = filter.finish();
+                            if !cur.is_empty() {
+                                break;
+                            }
+                            track_usage(0, 0, false);
+                            return Err(format!("读取流式响应失败：{e}"));
+                        }
+                    };
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with(':') {
+                        continue;
+                    }
+                    let Some(data_str) = trimmed.strip_prefix("data:") else {
+                        if raw_non_sse.len() < 8192 {
+                            raw_non_sse.push_str(trimmed);
+                        }
+                        continue;
+                    };
+                    let payload = data_str.trim();
+                    if payload == "[DONE]" {
+                        break;
+                    }
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+                        continue;
+                    };
+                    if v.get("usage").is_some() {
+                        let u = usage_of(&v);
+                        if u.total_tokens > 0 || u.prompt_tokens > 0 || u.completion_tokens > 0 {
+                            usage = u;
+                        }
+                    }
+                    if let Some(err_msg) = v["error"]["message"]
+                        .as_str()
+                        .or_else(|| v["error"].as_str())
+                    {
+                        track_usage(0, 0, false);
+                        return Err(format!("网关报错：{}", truncate(err_msg)));
+                    }
+
+                    let choice = &v["choices"][0];
+                    let delta = if choice.get("delta").is_some() {
+                        &choice["delta"]
+                    } else {
+                        &choice["message"]
+                    };
+                    let r_delta = delta["reasoning_content"]
+                        .as_str()
+                        .or_else(|| delta["reasoning"].as_str())
+                        .or_else(|| delta["thought"].as_str())
+                        .unwrap_or("");
+                    let c_delta = delta["content"].as_str().unwrap_or("");
+
+                    let (phase, visible) = filter.push_delta(r_delta, c_delta);
+                    if phase == "thinking" {
+                        if !notified_thinking {
+                            notified_thinking = true;
+                            on_progress("thinking", "💭 正在思考…");
+                        }
+                    } else if !visible.is_empty() && last_emit.elapsed().as_millis() >= 55 {
+                        last_emit = std::time::Instant::now();
+                        on_progress("streaming", &visible);
+                    }
+                }
+
+                // 若网关未设置 Content-Type 但实际返回了整包 JSON
+                if filter.finish().is_empty() && !raw_non_sse.is_empty() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw_non_sse) {
+                        let u = usage_of(&v);
+                        track_usage(u.prompt_tokens, u.completion_tokens, true);
+                        let picked = pick_message_ex(&v, model_hint);
+                        if !picked.content.is_empty() {
+                            on_progress("done", &picked.content);
+                            return Ok(picked.content);
+                        }
+                    }
+                }
+
+                if filter.saw_reasoning && !model_hint.is_empty() {
+                    mark_reasoning_model(model_hint);
+                }
+
+                let final_text = filter.finish();
+                let est_completion = if usage.completion_tokens > 0 {
+                    usage.completion_tokens
+                } else {
+                    (final_text.chars().count() as i64 / 2).max(1)
+                };
+                track_usage(usage.prompt_tokens, est_completion, !final_text.is_empty());
+
+                if !final_text.is_empty() {
+                    on_progress("done", &final_text);
+                    return Ok(final_text);
+                }
+
+                // 如果流式期间模型只输出了 <think> 就被截断，回退走带预算扩容的 chat_with_budget
+                return Err("STREAM_EMPTY_AFTER_THINK".into());
+            }
+            Err(ureq::Error::Status(404, r)) if url_idx + 1 < urls.len() => {
+                let _ = r.into_string();
+                url_idx += 1;
+            }
+            Err(ureq::Error::Status(400, r)) if !downgraded_400 => {
+                let body_txt = r.into_string().unwrap_or_default();
+                if let Some(next_body) = downgrade_incompatible_params(&cur_body, &body_txt) {
+                    downgraded_400 = true;
+                    cur_body = next_body;
+                    continue;
+                }
+                track_usage(0, 0, false);
+                return Err(format!("HTTP 400：{}", truncate(&body_txt)));
+            }
+            Err(ureq::Error::Status(429, r)) if attempt == 0 => {
+                let _ = r.into_string();
+                track_usage(0, 0, false);
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                if tried_direct_bypass {
+                    mark_bypass_tun(url);
+                }
+                let body_txt = r.into_string().unwrap_or_default();
+                track_usage(0, 0, false);
+                return Err(format!("HTTP {code}：{}", truncate(&body_txt)));
+            }
+            Err(ureq::Error::Transport(_)) if !use_direct && host_of_url(url) != "127.0.0.1" => {
+                tried_direct_bypass = true;
+                continue;
+            }
+            Err(e) => {
+                if use_direct && attempt < 2 {
+                    if let Ok(mut g) = cached_nic_cell().lock() {
+                        *g = None;
+                    }
+                    continue;
+                }
+                track_usage(0, 0, false);
+                return Err(format!("请求失败：{e}"));
+            }
+        }
+    }
+    Err("请求失败：多次重试后仍未成功".into())
+}
+
+fn chat_with_optional_stream<F>(
+    f: &LlmFile,
+    system: &str,
+    user: &str,
+    base_tokens: u64,
+    temperature: f64,
+    mut on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str, &str),
+{
+    if !f.stream {
+        let res = chat_with_budget(f, system, user, base_tokens, temperature)?;
+        on_progress("done", &res);
+        return Ok(res);
+    }
+
+    let model = f.model.trim();
+    let max_tokens = if is_reasoning_model(model) {
+        (base_tokens.saturating_mul(4)).clamp(2048, 4096)
+    } else {
+        base_tokens
+    };
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": true
+    });
+
+    match post_chat_stream(f, body, 90, model, &mut on_progress) {
+        Ok(text) => Ok(text),
+        Err(e) if e == "STREAM_EMPTY_AFTER_THINK" => {
+            // 流式在思考阶段耗尽预算，自动用非流式大预算重试兜底
+            let res = chat_with_budget(f, system, user, base_tokens.saturating_mul(4).max(2048), temperature)?;
+            on_progress("done", &res);
+            Ok(res)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 支持流式回调的剪贴板场景化问答（当 `f.stream == true` 时流式回调 `on_progress`）。
+pub fn chat_clipboard_scene_with_stream<F>(
     f: &LlmFile,
     user_text: &str,
     scene: &str,
     workload_ctx: &str,
-) -> Result<String, String> {
+    on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str, &str),
+{
     let started = std::time::Instant::now();
     let model = f.model.trim().to_string();
     let text = user_text.trim();
@@ -2051,7 +2469,7 @@ pub fn chat_clipboard_scene(
     let sys = format!(
         "{SYSTEM_PROMPT}\n\n【场景理解】{scene_guide}\n【用户当前工作负载】{workload_ctx}"
     );
-    let res = chat_with_budget(f, &sys, text, 1400, 0.3).and_then(|c| {
+    let res = chat_with_optional_stream(f, &sys, text, 1400, 0.3, on_progress).and_then(|c| {
         if c.is_empty() {
             Err("模型返回了空内容".into())
         } else {
@@ -2059,6 +2477,44 @@ pub fn chat_clipboard_scene(
         }
     });
     record(Mode::Explain, &model, started, &res);
+    res
+}
+
+/// 支持流式回调的对话模式（供 `chat_text` 等调用）。
+pub fn chat_mode_with_stream<F>(
+    f: &LlmFile,
+    user_text: &str,
+    mode: Mode,
+    on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str, &str),
+{
+    let started = std::time::Instant::now();
+    let model = f.model.trim().to_string();
+    let text = user_text.trim();
+    if text.is_empty() {
+        return Err("问题是空的".into());
+    }
+    if model.is_empty() {
+        return Err("尚未填写模型名".into());
+    }
+    let res = chat_with_optional_stream(
+        f,
+        mode.system_prompt(),
+        text,
+        1400,
+        if mode == Mode::Translate { 0.1 } else { 0.3 },
+        on_progress,
+    )
+    .and_then(|c| {
+        if c.is_empty() {
+            Err("模型返回了空内容".into())
+        } else {
+            Ok(c)
+        }
+    });
+    record(mode, &model, started, &res);
     res
 }
 
