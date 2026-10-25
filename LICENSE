@@ -1,0 +1,103 @@
+Non-Commercial Educational & Personal Study License
+(Based on PolyForm Noncommercial License 1.0.0 + No-Warranty Legal Disclaimer)
+
+Copyright (c) 2026 pekingstyle (WorkMate Contributors). All rights reserved.
+
+================================================================================
+IMPORTANT LEGAL NOTICE / 重要法律与开源协议声明
+================================================================================
+
+1. PERSONAL STUDY & NON-COMMERCIAL USE ONLY (仅限个人学习与非商业用途)
+   This software and its source code ("WorkMate") are published solely for
+   personal study, academic research, and technical exchange.
+   ANY COMMERCIAL USE, COMMERCIAL DISTRIBUTION, MONETIZATION, OR DEPLOYMENT IN
+   A COMMERCIAL ENVIRONMENT IS STRICTLY PROHIBITED.
+
+   本项目及其全部源代码与资源仅供个人学习、技术研究与学术交流使用。
+   严禁将本项目用于任何商业用途、商业分发、商业化运营或企业生产环境部署。
+
+2. PRIVACY & THIRD-PARTY API RESPONSIBILITY (隐私与第三方接口合规责任)
+   This software runs locally on the user's device. Users who configure
+   third-party Large Language Model (LLM) APIs are solely responsible for
+   complying with the terms of service, data privacy policies, and applicable
+   laws of their respective API providers and jurisdictions.
+
+3. NO WARRANTY & LIMITATION OF LIABILITY (免责声明与责任限制)
+   THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+   NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+   LIABLE FOR ANY CLAIM, DAMAGES, DATA LOSS, OR OTHER LIABILITY, WHETHER IN AN
+   ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+PolyForm Noncommercial License 1.0.0
+https://polyformproject.org/licenses/noncommercial/1.0.0
+================================================================================
+
+Acceptance
+In order to get any license under these terms, you must agree to them as both
+strict obligations and conditions to all your licenses.
+
+Copyright License
+The licensor grants you a copyright license for the software to do everything
+you might do with the software that would otherwise infringe the licensor's
+copyright in it for any permitted purpose. However, you may only distribute the
+software according to Distribution License and make changes or new works based
+on the software according to Changes and New Works License.
+
+Permitted Purpose
+A Permitted Purpose is any purpose other than a commercial purpose. A
+commercial purpose is any purpose primarily intended for or directed toward
+commercial advantage or monetary compensation. Personal study, private
+experimentation, and academic research are Permitted Purposes.
+
+Distribution License
+The licensor grants you an additional copyright license to distribute copies of
+the software for any Permitted Purpose. Your license to distribute covers
+distributing the software with changes and new works permitted by Changes and
+New Works License.
+
+Notices
+You must ensure that anyone who gets a copy of any part of the software from
+you also gets a copy of these terms or the URL for them above, as well as
+copies of any plain-text lines beginning with `Required Notice:` that the
+licensor provided with the software.
+
+Changes and New Works License
+The licensor grants you an additional copyright license to make changes and new
+works based on the software for any Permitted Purpose.
+
+Patent License
+The licensor grants you a patent license for the software that covers patent
+claims the licensor can license, or becomes able to license, that you would
+infringe by using the software for any Permitted Purpose.
+
+Fair Use
+You may have "fair use" rights for the software under the law. These terms do
+not limit them.
+
+No Other Rights
+These terms do not allow you to sublicense or transfer any of your licenses to
+anyone else, or prevent the licensor from granting licenses to anyone else.
+These terms do not imply any other licenses.
+
+Patent Defense
+If you make any written claim that the software infringes or contributes to
+infringement of any patent, your patent license for the software granted under
+these terms ends immediately. If your company makes such a claim, your patent
+license ends immediately for work on behalf of your company.
+
+Violations
+The first time you are notified in writing that you have violated any of these
+terms, or done anything with the software not covered by your licenses, your
+licenses can nonetheless continue if you come into full compliance with these
+terms, and take practical steps to correct past violations, within 32 days of
+receiving notice. Otherwise, all your licenses end immediately.
+
+No Liability
+***As far as the law allows, the software comes as is, without any warranty or
+condition, and the licensor will not be liable to you for any damages arising
+out of these terms or the use or nature of the software, under any kind of
+legal claim.***

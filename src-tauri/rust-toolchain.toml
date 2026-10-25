@@ -1,0 +1,4 @@
+# Tauri 在 Windows 必须用 MSVC 工具链（WebView2 是 COM/WinRT 组件，MinGW 不兼容，
+# 表现为窗口建得出来但 WebView 全白 / 反复崩溃）。
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"

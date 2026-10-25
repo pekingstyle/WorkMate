@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>WorkMate · Pet</title>
+<link rel="stylesheet" href="./pet/pet.css" />
+</head>
+<body class="state-idle">
+  <div class="stage">
+    <div class="shadow"></div>
+
+    <div class="pet" id="pet" data-tauri-drag-region>
+      <img id="pet-img" src="./assets/avatar/pet.apng" alt="" draggable="false" />
+    </div>
+
+    <!-- 低功耗静态形象：隐藏 img 的作用只是让 Vite 把它作为资源打包并拿到最终 URL
+         （TS 里的字符串路径不会被 Vite 处理，只有 HTML 里的资源引用才会被重写） -->
+    <img id="pet-static-src" src="./assets/avatar/pet-static.png" alt="" hidden />
+
+    <!-- 表情装饰层：不侵入 SVG，避免破坏等距 3D 的贴合 -->
+    <div class="fx" id="fx" aria-hidden="true"></div>
+
+    <!-- 气泡：外层负责定位与尾巴，内层负责滚动。
+         尾巴必须在外层——放滚动容器里会跟着内容滚到半腰，
+         选中文字时白三角压在高亮上就是一个突兀的"菱形"（用户截图抓到的）。 -->
+    <div class="bubble" id="bubble" hidden>
+      <div class="bubble-body" id="bubbleBody"><span id="bubbleText"></span></div>
+    </div>
+  </div>
+
+  <!-- 右键菜单：不用系统菜单，全部自绘；围绕「理解剪贴板场景 → 衔接待办/行程与工作负载」组织 -->
+  <div class="ctxmenu" id="ctxmenu" hidden>
+    <div class="ctx-scene" id="ctx-scene" hidden></div>
+    <button type="button" data-act="focus" id="ctx-focus">🎯 开始专注</button>
+    <button type="button" data-act="ask" id="ctx-ask">问问剪贴板</button>
+    <button type="button" data-act="task" id="ctx-task">提取待办 / 出差行程</button>
+    <button type="button" data-act="workload" id="ctx-workload">盘点当前工作负载</button>
+    <div class="sep"></div>
+    <button type="button" data-act="panel">打开面板</button>
+    <button type="button" data-act="say">说句话</button>
+    <button type="button" data-act="present">演示模式 1 小时</button>
+    <button type="button" data-act="hide">隐藏 30 分钟</button>
+    <div class="sep"></div>
+    <button type="button" data-act="quit" class="danger">退出 WorkMate</button>
+  </div>
+
+  <script type="module" src="./pet/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+[package]
+name = "workmate"
+version = "0.1.0"
+edition = "2021"
+description = "WorkMate - desktop companion AI assistant"
+authors = ["WorkMate Contributors"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# 生产构建必须启用：把 frontendDist 的前端资源嵌入 exe。
+# 未启用时 release 构建不会打包 dist，窗口会显示"无法访问此页面"（ERR_FILE_NOT_FOUND）。
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-window-state = "2"
+tauri-plugin-global-shortcut = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+flate2 = "1"
+ureq = { version = "2.10", features = ["json"] }
+webpki-roots = "0.26"
+# 控制面监听需要自己设 SO_REUSEADDR：Windows 上 std 的 TcpListener::bind 不设它，
+# 上一个实例关闭后端口会在 TIME_WAIT 里待约两分钟，新实例必定绑定失败。
+socket2 = "0.6"
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+  "Win32_System_Threading",
+  "Win32_System_ProcessStatus",
+  "Win32_System_SystemInformation",
+  "Win32_System_DataExchange",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_Security_Cryptography",
+  "Win32_System_Memory",
+  "Devices_Geolocation",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

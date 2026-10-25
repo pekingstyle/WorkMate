@@ -1,0 +1,704 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>WorkMate · 面板</title>
+<style>
+  :root {
+    /* 面板用 HarmonyOS Sans SC：比微软雅黑更中性，中英混排的对齐更整齐。
+       缺字体时回退思源黑体 / 系统字体，不影响可用性。 */
+    --font-sans: "HarmonyOS Sans SC", "Noto Sans SC", "思源黑体", "Microsoft YaHei UI",
+      "Microsoft YaHei", system-ui, sans-serif;
+    /* ClickUp 风格：冷调浅底 + 品牌紫，配粉→紫渐变做品牌识别。
+       与原先的奶油底 + 陶土橙（偏 Claude）完全区分开。 */
+    --bg: #F7F8FC;
+    --card: #FFFFFF;
+    --line: #E7E8F2;
+    --text: #1E1E2E;
+    --muted: #6B6B85;
+    --accent: #7B68EE;      /* ClickUp 品牌紫 */
+    --accent-deep: #5B4BD6; /* 深紫：白字压得住的那一档（对比 6:1） */
+    --bar: #EAEBF5;
+    --soft: #F0F1F9;        /* 浅冷底：hover / 徽章 / 代码 */
+    --brand-grad: linear-gradient(90deg, #FB4570 0%, #7B68EE 100%);
+    /* 按钮专用渐变：两端都压深，保证白字可读（亮色渐变直接放白字会掉到 3.4:1） */
+    --btn-grad: linear-gradient(90deg, #D63A85 0%, #5B4BD6 100%);
+    --ok: #1A7F4B;
+    --err: #D93025;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px 18px 22px;
+    background: var(--bg);
+    color: var(--text);
+    font: 400 13px/1.6 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 标题做成品牌渐变字：ClickUp 的标志性观感。
+     用 background-clip 上色而不是直接写 color，文字仍旧是真文本（可选中、可缩放）。 */
+  h1 {
+    margin: 0 0 2px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: .01em;
+    background: var(--brand-grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 13px 15px;
+    margin-bottom: 11px;
+  }
+  .card h2 .h2-sub { float: right; font-weight: 400; color: #8A8AA5; }
+  .card h2 {
+    margin: 0 0 9px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: .02em;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--line);
+  }
+  .row:last-child { border-bottom: none; }
+  .k { color: var(--muted); }
+  .v { font-variant-numeric: tabular-nums; }
+  .empty { color: #A5A5BD; }
+
+  .bars { margin-top: 4px; }  .bar-item { margin-bottom: 7px; }
+  .bar-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    margin-bottom: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar-track {
+    height: 6px;
+    background: var(--bar);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  /* 分布条按排名用渐变浓淡：长条更饱和，短条更淡，视觉上自然分主次 */
+  .bar-fill {
+    height: 100%;
+    background: var(--brand-grad);
+    border-radius: 3px;
+    transition: width .3s ease;
+  }
+
+  /* 纵向彩色时间序列图：上方颜色图例 + 左侧纵向小时轴 + 右侧 60 分钟比例色块轨 */
+  .blocks { margin-top: 6px; }
+  .tl-legend {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-bottom: 10px; padding-bottom: 8px;
+    border-bottom: 1px dashed var(--line);
+  }
+  .tl-leg-item {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 999px;
+    background: var(--soft); font-size: 11.5px; color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .tl-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: none;
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.85);
+  }
+  .tl-leg-item b { font-weight: 600; color: var(--muted); margin-left: 1px; }
+
+  .tl-ruler {
+    display: flex; align-items: center;
+    padding: 0 44px 4px 50px;
+    font-size: 10px; color: #9CA3AF;
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+  .tl-ruler span { flex: 1; text-align: left; }
+  .tl-ruler span:last-child { flex: 0; text-align: right; }
+
+  .tl-spine { display: flex; flex-direction: column; gap: 5px; position: relative; }
+  .tl-row {
+    display: flex; align-items: center; gap: 8px;
+    height: 22px; font-size: 11.5px;
+  }
+  .tl-hr {
+    width: 36px; flex: none; color: var(--muted);
+    font-variant-numeric: tabular-nums; font-size: 11px; text-align: right;
+  }
+  .tl-node {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #CBD5E1; flex: none; position: relative;
+  }
+  .tl-row.active-now .tl-node {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.2);
+  }
+  .tl-track {
+    flex: 1; height: 18px; position: relative;
+    background: #F1F3F9; border-radius: 5px; overflow: hidden;
+    background-image: linear-gradient(
+      to right,
+      transparent 24.8%, rgba(0,0,0,0.045) 25%, transparent 25.2%,
+      transparent 49.8%, rgba(0,0,0,0.06) 50%, transparent 50.2%,
+      transparent 74.8%, rgba(0,0,0,0.045) 75%, transparent 75.2%
+    );
+  }
+  .tl-seg {
+    position: absolute; top: 2px; bottom: 2px;
+    border-radius: 3.5px; min-width: 4px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 9.5px; font-weight: 500;
+    overflow: hidden; white-space: nowrap;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.22);
+    transition: transform .12s ease, filter .12s ease;
+  }
+  .tl-seg:hover {
+    filter: brightness(1.08);
+    transform: scaleY(1.14);
+    z-index: 2;
+  }
+  .tl-dur {
+    width: 38px; flex: none; text-align: right;
+    color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+  .tl-gap {
+    display: flex; align-items: center; gap: 8px;
+    padding-left: 38px; height: 13px;
+    font-size: 10px; color: #A5A5BD;
+  }
+  .tl-gap-dots {
+    width: 6px; text-align: center; line-height: 1; font-weight: bold; color: #CBD5E1;
+  }
+  .tl-inspect {
+    margin-top: 8px; padding: 5px 9px;
+    border-radius: 6px; background: var(--soft);
+    font-size: 11.5px; color: var(--text);
+    display: flex; align-items: center; gap: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    padding: 6px 11px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #fff;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--soft); }
+  button.primary {
+    background: var(--btn-grad);
+    border-color: transparent;
+    color: #fff;
+    font-weight: 500;
+  }
+  button.primary:hover { filter: brightness(1.07); }
+
+  code {
+    background: var(--soft);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+  .path { font-size: 11px; color: var(--muted); word-break: break-all; }
+
+  .add-row { display: flex; gap: 7px; }
+  .add-row input[type="text"] {
+    flex: 1;
+    padding: 6px 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    font: inherit;
+    font-size: 12px;
+    background: #fff;
+    color: var(--text);
+  }
+  .add-row input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+  .quick input[type="datetime-local"] {
+    padding: 5px 7px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    font: inherit;
+    font-size: 11px;
+    background: #fff;
+    color: var(--text);
+  }
+  .rm-list { margin-top: 10px; }
+  .rm-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 0;
+    border-bottom: 1px dashed var(--line);
+  }
+  .rm-item:last-child { border-bottom: none; }
+  .rm-main { flex: 1; min-width: 0; }
+  .rm-title { font-size: 12.5px; }
+  .rm-meta { font-size: 11px; color: var(--muted); }
+  .rm-item.done .rm-title { text-decoration: line-through; color: #A5A5BD; }
+  .rm-item.fired .rm-title { color: var(--accent); }
+  .rm-act {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 3px 5px;
+    border-radius: 5px;
+  }
+  .rm-act:hover { background: var(--soft); color: var(--text); }
+  .rm-empty { font-size: 12px; color: #8A8AA5; }
+  .rm-meta .pri-hi { color: var(--err); font-weight: 600; }
+  .rm-meta .tz-sub { color: #6B6B88; font-size: 10.5px; }
+  .tz-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 9px;
+    margin-bottom: 8px;
+    border-radius: 7px;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .tz-bar b { color: var(--text); font-weight: 600; }
+  .tz-bar .tz-warn { color: var(--accent); font-weight: 500; }
+
+  .form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .form-row label {
+    width: 62px;
+    flex: none;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .form-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 5px 8px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    font: inherit;
+    font-size: 12px;
+    background: #fff;
+    color: var(--text);
+  }
+  .form-row input:focus { outline: none; border-color: var(--accent); }
+  .llm-status { font-size: 11.5px; color: var(--muted); align-self: center; }
+  .llm-status.ok { color: var(--ok); }
+  .llm-status.err { color: var(--err); }
+  .hint { font-size: 11px; color: #8A8AA5; margin-top: 7px; line-height: 1.5; }
+
+  /* 今日概览：五个数字 + 分类分布条 */
+  .today-grid { display: flex; gap: 6px; margin-top: 4px; }
+  .today-num {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    padding: 8px 2px; border-radius: 9px; background: var(--soft);
+  }
+  .today-num b {
+    font-size: 17px; font-weight: 600; color: var(--text); line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+  }
+  .today-num span { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .today-cats { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+  .today-cats .chip {
+    font-size: 11px; padding: 3px 8px; border-radius: 999px;
+    background: var(--soft); color: #5A5A72;
+  }
+  .today-cats .chip b { font-weight: 600; color: var(--text); }
+
+  .switch-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; }
+  .switch-row input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+  .toast {
+    margin-top: 9px;
+    font-size: 12px;
+    color: var(--ok);
+    min-height: 16px;
+  }
+
+  /* Tab 导航：把「报告 / 操作 / 配置 / 技术」分开，避免一进来就是配置参数 */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin: 4px 0 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .tabs button {
+    border: 0;
+    background: transparent;
+    padding: 7px 10px 8px;
+    font-size: 12.5px;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+  }
+  .tabs button:hover { background: transparent; color: var(--text); }
+  /* 激活 Tab 的下划线走品牌渐变。border-image 只能作用在被单独指定的那条边上，
+     所以先给四边留 2px 透明底、再用 border-image 只渲染下边。 */
+  .tabs button.on {
+    color: var(--text);
+    border-bottom: 2px solid transparent;
+    border-image: var(--brand-grad) 1;
+  }
+
+  .llm-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .badge {
+    font-size: 11px; padding: 2px 9px; border-radius: 999px;
+    background: var(--soft); color: var(--muted); border: 1px solid var(--line);
+  }
+  .badge.ok { background: #E6F4EA; color: var(--ok); border-color: #C6E6D1; }
+  .badge.err { background: #FDE8E6; color: var(--err); border-color: #F6CFCB; }
+
+  .usage-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 9px;
+  }
+  .usage-cell {
+    background: var(--soft);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .u-k { font-size: 11px; color: var(--muted); }
+  .usage-cell b { font-size: 17px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  .usage-days { margin-top: 8px; }
+  .uday { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 11.5px; }
+  .uday .ud { width: 52px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .uday .utrack { flex: 1; height: 5px; background: var(--bar); border-radius: 3px; overflow: hidden; }
+  .uday .ufill { height: 100%; background: var(--brand-grad); border-radius: 3px; }
+  .uday .un { width: 96px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .uday.today .ud { color: var(--text); font-weight: 500; }
+  .badge.busy { background: #FDF3E3; color: #8A5A12; border-color: #EFD9B4; }
+  .llm-model { font-size: 12px; color: var(--muted); }
+
+  details.adv { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 9px; }
+  details.adv > summary {
+    font-size: 11.5px; color: var(--muted); cursor: pointer; list-style: none;
+    padding: 2px 0;
+  }
+  details.adv > summary::-webkit-details-marker { display: none; }
+  details.adv > summary::before { content: "▸ "; }
+  details.adv[open] > summary::before { content: "▾ "; }
+  details.adv > summary:hover { color: var(--text); }
+
+  .mem-scope { margin-top: 10px; }
+  .mem-scope-h {
+    margin: 10px 0 5px; font-size: 11px; letter-spacing: .04em;
+    color: var(--muted); border-left: 2px solid var(--accent); padding-left: 7px;
+  }
+  .mem-note { padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 12px; line-height: 1.65; }
+  .mem-note:last-child { border-bottom: none; }
+  .mem-note .when { color: var(--muted); font-size: 10.5px; margin-right: 6px; font-variant-numeric: tabular-nums; }
+
+  .mem-facts {
+    margin: 8px 0 0; padding: 9px 10px; max-height: 220px; overflow: auto;
+    background: var(--panel-2, rgba(0, 0, 0, .04)); border-radius: 8px;
+    font: 400 11px/1.7 ui-monospace, "Cascadia Code", Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all; color: var(--text);
+  }
+  .rm-item .tag {
+    display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px;
+    font-size: 10.5px; line-height: 16px; background: var(--accent); color: #fff;
+  }
+  .risk-l1 { color: var(--muted); }
+  .risk-l2 { color: #B8860B; }
+  .risk-l3 { color: #C0392B; }
+
+  .log-list { margin-top: 9px; }
+  .log-item {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--line);
+  }
+  .log-item:last-child { border-bottom: none; }
+  .log-item a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .log-item a:hover { text-decoration: underline; }
+  .log-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <h1>WorkMate</h1>
+
+  <nav class="tabs">
+    <button data-tab="today" class="on">今日</button>
+    <button data-tab="todo">待办</button>
+    <button data-tab="assistant">LLM API</button>
+    <button data-tab="memory">记忆</button>
+    <button data-tab="tech">技术</button>
+  </nav>
+
+  <!-- ============ 今日：只放「看」的东西 ============ -->
+  <section data-pane="today">
+    <div class="card">
+      <h2>今日概览</h2>
+      <div class="today-grid">
+        <div class="today-num"><b id="td-focus">—</b><span>专注分钟</span></div>
+        <div class="today-num"><b id="td-pending">—</b><span>待办</span></div>
+        <div class="today-num"><b id="td-done">—</b><span>已完成</span></div>
+        <div class="today-num"><b id="td-water">—</b><span>喝水</span></div>
+        <div class="today-num"><b id="td-stand">—</b><span>站起</span></div>
+      </div>
+      <div class="today-cats" id="td-cats"></div>
+      <div class="tz-bar" id="td-focus-bar" style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span id="td-intr-trend">🎯 专注模式未开启</span>
+        <button type="button" class="primary" id="btn-focus-toggle" style="padding:4px 10px;font-size:11.5px">开始专注</button>
+      </div>
+      <div class="hint" id="td-sched">—</div>
+    </div>
+
+    <div class="card">
+      <h2>今天在做什么 <span class="h2-sub" id="blk-sum"></span></h2>
+      <div id="today-blocks" class="blocks">
+        <div class="empty">还没有工作记录。用几分钟就会自动出现。</div>
+      </div>
+      <div class="hint">纵向按小时展开、横向代表每小时内的 0–60 分钟；上方色标对应打开的应用类别，悬停色块可看具体时段。</div>
+    </div>
+
+    <div class="card">
+      <h2>此刻</h2>
+      <div class="row"><span class="k">前台类别</span><span class="v" id="ctx-app">—</span></div>
+      <div class="row"><span class="k">键鼠空闲</span><span class="v" id="ctx-idle">—</span></div>
+      <div class="row"><span class="k">连续专注</span><span class="v" id="ctx-focus">—</span></div>
+      <div class="row"><span class="k">最后采样</span><span class="v" id="ctx-ts">—</span></div>
+      <div class="hint">「连续专注」按<b>应用类别</b>算（编码/办公/浏览器/会议/IM/媒体/其他），不是同一个窗口：<br />键鼠空闲 ≥ 60 秒即判离开、立即归零；切到别的类别有 2 分钟宽限，切回来接着算（离开的时间不计）。</div>
+    </div>
+
+    <div class="card">
+      <h2>近 24 小时分布 <span class="h2-sub" id="bars-total"></span></h2>
+      <div class="bars" id="bars">
+        <div class="empty">暂无数据，去「技术」页生成模拟数据</div>
+      </div>
+      <div class="hint">统计口径：每 5 秒采样一次，键鼠未闲置超过 1 分钟即计 5 秒活跃时长。</div>
+    </div>
+  </section>
+
+  <!-- ============ 待办：只放「做」的东西 ============ -->
+  <section data-pane="todo" hidden>
+    <div class="card">
+      <h2>待办提醒</h2>
+      <div class="tz-bar" id="rm-tz-bar">
+        <span id="rm-tz-text">🌏 计时基准：<b>中国标准时间 (UTC+8)</b></span>
+      </div>
+      <div class="add-row">
+        <input id="rm-title" type="text" placeholder="明天早晨提醒我发周报 / 明天中午对齐需求" maxlength="80" />
+        <button class="primary" id="rm-add">添加</button>
+      </div>
+      <div class="hint" id="rm-parse">支持按当前城市时间识别「明天早晨」「明天中午」「今晚8点」「30分钟后」</div>
+      <div class="quick">
+        <button data-min="30">30 分钟后</button>
+        <button data-min="60">1 小时后</button>
+        <button data-min="180">3 小时后</button>
+        <input id="rm-time" type="datetime-local" title="按当前所在城市时区选择提醒时刻" />
+      </div>
+      <div id="rm-list" class="rm-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ LLM API：状态在前，参数折叠 ============ -->
+  <section data-pane="assistant" hidden>
+    <div class="card">
+      <h2>模型接入</h2>
+      <div class="llm-head">
+        <span class="badge" id="llm-badge">检测中</span>
+        <span class="llm-model" id="llm-model-name"></span>
+      </div>
+      <div class="row"><span class="k">最近一次调用</span><span class="v" id="llm-last">—</span></div>
+      <div class="hint" id="llm-last-detail"></div>
+
+      <details class="adv" id="llm-adv">
+        <summary>接入设置（Base URL / 模型名 / API Key）</summary>
+        <div class="form-row" style="margin-top:8px">
+          <label>Base URL</label>
+          <input id="llm-base" type="text" placeholder="https://api.deepseek.com/v1" spellcheck="false" />
+        </div>
+        <div class="form-row">
+          <label>模型名</label>
+          <input id="llm-model" type="text" placeholder="deepseek-chat" spellcheck="false" />
+        </div>
+        <div class="form-row">
+          <label>API Key</label>
+          <input id="llm-key" type="password" placeholder="留空表示不修改" spellcheck="false" autocomplete="off" />
+        </div>
+        <div class="actions" style="margin-top:9px">
+          <button class="primary" id="llm-save">保存</button>
+          <button id="llm-test">测试连接</button>
+          <span class="llm-status" id="llm-status"></span>
+        </div>
+        <div class="hint">Key 用 Windows DPAPI 加密后存本地（绑定当前账户），前端只显示掩码。</div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>用量（防滥用）</h2>
+      <div class="usage-grid">
+        <div class="usage-cell"><span class="u-k">今日请求</span><b id="use-today-req">—</b></div>
+        <div class="usage-cell"><span class="u-k">今日 tokens</span><b id="use-today-tok">—</b></div>
+        <div class="usage-cell"><span class="u-k">近 30 天请求</span><b id="use-30-req">—</b></div>
+        <div class="usage-cell"><span class="u-k">近 30 天 tokens</span><b id="use-30-tok">—</b></div>
+      </div>
+      <div class="row"><span class="k">本次启动以来</span><span class="v" id="use-since">—</span></div>
+      <div id="use-days" class="usage-days"></div>
+      <div class="hint">按北京时间自然日统计。失败的请求也计入次数——网关侧可能照样计费，只算成功的会低估开销。</div>
+    </div>
+
+    <div class="card">
+      <h2>偏好</h2>
+      <label class="switch-row">
+        <input type="checkbox" id="opt-lowpower" />
+        <span>低功耗模式（静态形象）</span>
+      </label>
+      <div class="hint">APNG 每秒解码约 7.5 帧，是空闲 CPU 的主要来源；笔记本、远程桌面或投屏时可压到接近 0。</div>
+
+      <label class="switch-row" style="margin-top:10px">
+        <input type="checkbox" id="opt-digest" />
+        <span>每天提醒一次逾期事项</span>
+      </label>
+      <div class="hint">逾期 ≥2 件时，每天最多提一次（挑最久的那件说）。不主动提的话，它们会安静地堆起来。</div>
+
+      <label class="switch-row" style="margin-top:10px">
+        <input type="checkbox" id="opt-adaptive-quiet" />
+        <span>深夜用电脑时不按静默处理</span>
+      </label>
+      <div class="hint">静默时段默认 21:30–08:30 与 12:00–13:30。开着这个开关时，如果检测到你确实在用电脑，提醒照常发，不会被推到第二天早上。</div>
+    </div>
+  </section>
+
+  <!-- ============ 记忆：AI 可查询的长期记忆（位置 / 习惯 / 风险 / 问答） ============ -->
+  <section data-pane="memory" hidden>
+    <div class="card">
+      <h2>位置与出差</h2>
+      <div class="row"><span class="k">当前位置</span><span class="v" id="loc-now">—</span></div>
+      <div class="row"><span class="k">生效时区</span><span class="v" id="loc-tz">—</span></div>
+      <div class="row"><span class="k">来源</span><span class="v" id="loc-src">—</span></div>
+      <div class="row"><span class="k">常驻地</span><span class="v" id="loc-home">—</span></div>
+      <div class="add-row">
+        <input id="loc-input" type="text" placeholder="手填城市，如：上海" maxlength="40" />
+        <button class="primary" id="loc-save">设为位置</button>
+      </div>
+      <div class="actions">
+        <button id="loc-refresh">立即定位</button>
+        <button id="loc-ashome">把当前位置设为常驻地</button>
+        <button id="loc-clear">清除轨迹</button>
+      </div>
+      <div class="hint">定位优先用 Windows 定位服务，取不到可用手填。与常驻地不同即记为出差。</div>
+      <div id="loc-trips" class="rm-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>问一句</h2>
+      <div class="add-row">
+        <input id="mem-q" type="text" placeholder="我最近都去哪里出差了？" maxlength="120" />
+        <button class="primary" id="mem-ask">问</button>
+      </div>
+      <div class="quick" id="mem-quick">
+        <button data-q="我最近都去哪里出差了">最近去哪出差</button>
+        <button data-q="我还有什么待办没做">还有什么待办</button>
+        <button data-q="我的工作习惯是什么样的">我的工作习惯</button>
+        <button data-q="最近专注被打断的次数是上升了还是下降了">专注打断趋势</button>
+        <button data-q="现在有什么需要注意的">有什么风险</button>
+      </div>
+      <div class="hint" id="mem-answer">—</div>
+      <details class="adv" id="mem-facts-box">
+        <summary>事实清单（模型只能用这些回答，不会编造）</summary>
+        <pre class="mem-facts" id="mem-facts">—</pre>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>习惯与风险</h2>
+      <div class="row"><span class="k">样本天数</span><span class="v" id="hb-samples">—</span></div>
+      <div class="row"><span class="k">平均开工 / 收工</span><span class="v" id="hb-span">—</span></div>
+      <div class="row"><span class="k">日均活跃</span><span class="v" id="hb-active">—</span></div>
+      <div class="row"><span class="k">时间去向</span><span class="v" id="hb-cats">—</span></div>
+      <div class="row"><span class="k">专注打断统计</span><span class="v" id="hb-intr-trend">—</span></div>
+      <div class="row"><span class="k">待办</span><span class="v" id="hb-tasks">—</span></div>
+      <div id="risk-list" class="rm-list"></div>
+      <div class="actions">
+        <button id="mem-scan">重新检查风险</button>
+        <button id="mem-rebuild">重算每日画像</button>
+      </div>
+      <div class="hint">「习惯」由每日画像（按北京时间自然日）统计得出；风险每 10 分钟重算一次。</div>
+    </div>
+
+    <div class="card">
+      <h2>记忆分层</h2>
+      <div class="row"><span class="k">当前提示语</span><span class="v" id="mem-warm">—</span></div>
+      <div class="actions">
+        <button class="primary" id="mem-daily">写今天的日记</button>
+        <button id="mem-rollup">做一次抽象</button>
+      </div>
+      <div class="mem-scope">
+        <div class="mem-scope-h">短期（1 周内 · 按天详细）</div>
+        <div id="notes-short" class="rm-list"></div>
+        <div class="mem-scope-h">中期（1 月内 · 已抽象掉时间戳）</div>
+        <div id="notes-mid" class="rm-list"></div>
+        <div class="mem-scope-h">长期（3 个月以上 · 一两句话）</div>
+        <div id="notes-long" class="rm-list"></div>
+      </div>
+      <div class="hint">每天后端调一次模型写日记（做了多少事、打断几次、去过哪、大概忙什么）；
+        跨月压成月度小结、满一季再压成长期印象，原件随后清除。没配模型时用规则兜底，不会断档。</div>
+    </div>
+  </section>
+
+  <!-- ============ 技术：数据库 + 日志 + 自检 ============ -->
+  <section data-pane="tech" hidden>
+    <div class="card">
+      <h2>数据库</h2>
+      <div class="row"><span class="k">schema 版本</span><span class="v" id="schema">—</span></div>
+      <div class="row"><span class="k">明细 events</span><span class="v" id="events">—</span></div>
+      <div class="row"><span class="k">预聚合 rollup_5m</span><span class="v" id="rollup">—</span></div>
+      <div class="row"><span class="k">记忆 facts</span><span class="v" id="facts">—</span></div>
+      <div class="row"><span class="k">磁盘占用</span><span class="v" id="size">—</span></div>
+      <div class="path" id="path"></div>
+    </div>
+
+    <div class="card">
+      <h2>日志</h2>
+      <div class="actions">
+        <button id="btn-log-open">打开当前日志</button>
+        <button id="btn-log-dir">打开日志目录</button>
+        <button id="btn-log-rotate">立即归档</button>
+        <button id="btn-log-clear">清理旧日志</button>
+      </div>
+      <div id="log-list" class="log-list"></div>
+      <div class="hint">按北京日期每日压缩归档到 logs/YYYY-MM-DD.log.gz；当前文件超过 8MB 也会归档。AI 接口调用、错误、崩溃都会写进日志。</div>
+    </div>
+
+    <div class="card">
+      <h2>自检</h2>
+      <div class="actions">
+        <button class="primary" id="btn-gen">生成 48 条模拟数据</button>
+        <button id="btn-rollup">立即聚合</button>
+        <button id="btn-refresh">刷新</button>
+        <button id="btn-reset">清空统计</button>
+      </div>
+      <div class="hint">模拟数据会混入「今日概览」与分布图，验证完点「清空统计」归零。</div>
+      <div class="toast" id="toast"></div>
+    </div>
+  </section>
+
+  <script type="module" src="./panel/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Local IDE, agent, and workspace metadata
+.workbuddy/
+.wbapp_*.genie
+.vscode/
+.idea/
+
+# Local benchmarks, desktop screenshots, and internal docs (keep local only, never push)
+bench/
+docs/
+web/
+src-tauri/.cargo/config.toml
+src-tauri/build_msvc.bat
+src-tauri/build_msvc.log
+src/assets/avatar/pet.orig.apng
+src/assets/avatar/toucan*.svg
+src/assets/avatar/toucan*.png
+src/assets/avatar/paths.json
+
+# Private runtime data, databases, logs, and API configs
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.log
+*.log.gz
+*.lock
+!package-lock.json
+!src-tauri/Cargo.lock
+llm.json
+.env
+.env.*
+*.key
+*.pem

@@ -1,0 +1,21 @@
+{
+  "name": "workmate",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WorkMate - desktop companion AI assistant (Tauri 2 + Live2D-ready canvas/SVG pet)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "puppeteer-core": "^25.16.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1"
+  }
+}
