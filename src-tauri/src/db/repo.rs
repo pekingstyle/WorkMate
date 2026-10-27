@@ -217,6 +217,8 @@ pub struct Reminder {
     pub location: String,
     /// 创建簿记时的时区偏移（分钟，相对 UTC，如 480 = UTC+8）
     pub tz_offset_min: i64,
+    /// 周期循环规则：""=单次, "daily"=每天, "workdays"=每个工作日, "weekly"=每周, "monthly"=每月, "every:Nd"=每N天
+    pub recur_rule: String,
 }
 
 pub fn add_reminder(
@@ -261,6 +263,8 @@ pub struct NewReminder {
     pub location: String,
     /// 创建簿记时的时区偏移（分钟，默认当前生效时区）
     pub tz_offset_min: i64,
+    /// 周期循环规则（空串表示单次任务）
+    pub recur_rule: String,
 }
 
 impl Default for NewReminder {
@@ -275,15 +279,16 @@ impl Default for NewReminder {
             note: String::new(),
             location: String::new(),
             tz_offset_min: crate::tz::CN_OFFSET_MIN,
+            recur_rule: String::new(),
         }
     }
 }
 
-/// 带优先级/时长/备注/位置/时区的插入（AI 解析待办用）
+/// 带优先级/时长/备注/位置/时区/周期规则的插入（AI 解析待办用）
 pub fn add_reminder_full(conn: &Connection, r: &NewReminder) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO reminders(fire_at, level, title, kind, created_at, priority, duration_min, note, location, tz_offset_min)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO reminders(fire_at, level, title, kind, created_at, priority, duration_min, note, location, tz_offset_min, recur_rule)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             r.fire_at,
             r.level,
@@ -294,7 +299,8 @@ pub fn add_reminder_full(conn: &Connection, r: &NewReminder) -> rusqlite::Result
             r.duration_min.max(0),
             r.note,
             r.location,
-            r.tz_offset_min
+            r.tz_offset_min,
+            r.recur_rule.trim()
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -304,7 +310,8 @@ pub fn add_reminder_full(conn: &Connection, r: &NewReminder) -> rusqlite::Result
 pub fn list_reminders(conn: &Connection) -> rusqlite::Result<Vec<Reminder>> {
     let mut stmt = conn.prepare(
         "SELECT id, fire_at, level, title, status, kind, created_at, priority, duration_min,
-                COALESCE(note, ''), COALESCE(location, ''), COALESCE(tz_offset_min, 480)
+                COALESCE(note, ''), COALESCE(location, ''), COALESCE(tz_offset_min, 480),
+                COALESCE(recur_rule, '')
          FROM reminders WHERE status IN (0, 1) AND kind = 0 ORDER BY fire_at ASC LIMIT 200",
     )?;
     let rows = stmt
@@ -322,26 +329,180 @@ pub fn list_reminders(conn: &Connection) -> rusqlite::Result<Vec<Reminder>> {
                 note: r.get(9)?,
                 location: r.get(10)?,
                 tz_offset_min: r.get(11)?,
+                recur_rule: r.get(12)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
+/// 周期规则的人类可读标签
+pub fn recur_label(rule: &str) -> String {
+    let r = rule.trim();
+    match r {
+        "" => String::new(),
+        "daily" => "每天".to_string(),
+        "workdays" => "每个工作日".to_string(),
+        "weekly" => "每周".to_string(),
+        "monthly" => "每月".to_string(),
+        _ if r.starts_with("every:") && r.ends_with('d') => {
+            let n = r
+                .trim_start_matches("every:")
+                .trim_end_matches('d')
+                .parse::<i64>()
+                .unwrap_or(1);
+            format!("每{n}天")
+        }
+        _ => r.to_string(),
+    }
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m_adj = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+            if leap { 29 } else { 28 }
+        }
+        _ => 30,
+    }
+}
+
+/// 从 `fire_at` 往前推进一个周期
+pub fn step_recurring_fire_at(fire_at: i64, rule: &str, tz_offset_min: i64) -> Option<i64> {
+    let r = rule.trim();
+    if r.is_empty() {
+        return None;
+    }
+    let offset_sec = tz_offset_min * 60;
+    let local = fire_at + offset_sec;
+    let days = local.div_euclid(86_400);
+    let tod = local.rem_euclid(86_400);
+
+    match r {
+        "daily" => Some(fire_at + 86_400),
+        "workdays" => {
+            let mut d = days + 1;
+            loop {
+                let wd = (d + 3).rem_euclid(7) + 1; // 1=Mon .. 7=Sun
+                if wd <= 5 {
+                    return Some(d * 86_400 + tod - offset_sec);
+                }
+                d += 1;
+            }
+        }
+        "weekly" => Some(fire_at + 7 * 86_400),
+        "monthly" => {
+            let (y, m, d) = civil_from_days(days);
+            let (ny, nm) = if m >= 12 { (y + 1, 1) } else { (y, m + 1) };
+            let nd = d.min(days_in_month(ny, nm));
+            let next_days = days_from_civil(ny, nm, nd);
+            Some(next_days * 86_400 + tod - offset_sec)
+        }
+        _ if r.starts_with("every:") && r.ends_with('d') => {
+            let n = r
+                .trim_start_matches("every:")
+                .trim_end_matches('d')
+                .parse::<i64>()
+                .ok()?
+                .max(1);
+            Some(fire_at + n * 86_400)
+        }
+        _ => None,
+    }
+}
+
+/// 计算周期任务的下一次未来触发时间（确保 > now）
+pub fn next_recurring_fire_at(
+    fire_at: i64,
+    now: i64,
+    rule: &str,
+    tz_offset_min: i64,
+) -> Option<i64> {
+    let mut cur = step_recurring_fire_at(fire_at, rule, tz_offset_min)?;
+    let mut guard = 0;
+    while cur <= now && guard < 1000 {
+        cur = step_recurring_fire_at(cur, rule, tz_offset_min)?;
+        guard += 1;
+    }
+    Some(cur)
+}
+
 /// 取出所有到点未触发的提醒，并原子地标记为已触发。
 ///
 /// 必须在一个事务里做「查 + 改」，否则轮询线程与面板刷新并发时，
 /// 同一条提醒可能被弹两次。
+/// 对于周期任务（recur_rule <> ''）：如果上一轮 status=1 忘了点完成，而新周期已到点，
+/// 自动推进到当前周期并重新触发提醒。
 pub fn take_due_reminders(
     conn: &mut Connection,
     now: i64,
 ) -> rusqlite::Result<Vec<Reminder>> {
     let tx = conn.transaction()?;
+    // 1) 检查已触发未完成（status = 1）的周期任务是否已进入下一周期
+    let stale_recurring: Vec<(i64, i64, String, i64)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, fire_at, COALESCE(recur_rule, ''), COALESCE(tz_offset_min, 480)
+             FROM reminders WHERE status = 1 AND kind = 0 AND COALESCE(recur_rule, '') <> ''",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (id, fire_at, rule, tz_off) in stale_recurring {
+        if let Some(next_step) = step_recurring_fire_at(fire_at, &rule, tz_off) {
+            if next_step <= now {
+                // 推进到 <= now 的最新一期，使其在本次轮询作为新周期提醒触发
+                let mut latest_due = next_step;
+                let mut guard = 0;
+                while let Some(s) = step_recurring_fire_at(latest_due, &rule, tz_off) {
+                    if s <= now && guard < 1000 {
+                        latest_due = s;
+                        guard += 1;
+                    } else {
+                        break;
+                    }
+                }
+                tx.execute(
+                    "UPDATE reminders SET status = 0, fired_at = NULL, fire_at = ?1 WHERE id = ?2",
+                    params![latest_due, id],
+                )?;
+            }
+        }
+    }
+
     // 注意：必须把 rows 先收集到具名变量，否则 stmt 的临时值活得不够久（E0597）
     let due: Vec<Reminder> = {
         let mut stmt = tx.prepare(
             "SELECT id, fire_at, level, title, status, kind, created_at, priority, duration_min,
-                    COALESCE(note, ''), COALESCE(location, ''), COALESCE(tz_offset_min, 480)
+                    COALESCE(note, ''), COALESCE(location, ''), COALESCE(tz_offset_min, 480),
+                    COALESCE(recur_rule, '')
              FROM reminders WHERE status = 0 AND fire_at <= ?1 ORDER BY fire_at ASC",
         )?;
         let rows = stmt
@@ -359,6 +520,7 @@ pub fn take_due_reminders(
                     note: r.get(9)?,
                     location: r.get(10)?,
                     tz_offset_min: r.get(11)?,
+                    recur_rule: r.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -375,7 +537,29 @@ pub fn take_due_reminders(
 }
 
 pub fn set_reminder_status(conn: &Connection, id: i64, status: i64) -> rusqlite::Result<bool> {
-    let done_at = if status == 2 { Some(now_sec()) } else { None };
+    let now = now_sec();
+    if status == 2 {
+        let meta: Option<(i64, String, i64)> = conn
+            .query_row(
+                "SELECT fire_at, COALESCE(recur_rule, ''), COALESCE(tz_offset_min, 480)
+                 FROM reminders WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+        if let Some((fire_at, rule, tz_off)) = meta {
+            if let Some(next_fire) = next_recurring_fire_at(fire_at, now, &rule, tz_off) {
+                let n = conn.execute(
+                    "UPDATE reminders
+                     SET status = 0, fired_at = NULL, fire_at = ?1, done_at = ?2
+                     WHERE id = ?3",
+                    params![next_fire, now, id],
+                )?;
+                return Ok(n > 0);
+            }
+        }
+    }
+    let done_at = if status == 2 { Some(now) } else { None };
     let n = conn.execute(
         "UPDATE reminders SET status = ?1, done_at = COALESCE(?2, done_at) WHERE id = ?3",
         params![status, done_at, id],
@@ -678,7 +862,7 @@ pub fn open_task_count(conn: &Connection) -> rusqlite::Result<i64> {
 
 pub fn done_since(conn: &Connection, since: i64) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT count(*) FROM reminders WHERE kind = 0 AND status = 2 AND done_at >= ?1",
+        "SELECT count(*) FROM reminders WHERE kind = 0 AND done_at IS NOT NULL AND done_at >= ?1",
         params![since],
         |r| r.get(0),
     )
@@ -818,26 +1002,38 @@ pub struct NewLocation<'a> {
     pub is_trip: bool,
 }
 
-/// 写一条位置记录。同一天同一标签不重复写（否则每分钟一条，表很快膨胀）。
-/// 标签变了才记——这才是"去过哪里"需要的粒度。
+/// 写一条位置记录。同一自然日内若最新一条已是同一标签则不重复新增，仅刷新 `is_trip` 与同日时间戳。
+///
+/// 修复跨日吞数据 bug：
+/// 旧逻辑用 `ts > l.ts - 6 * 3600` 去重并执行 `UPDATE locations SET ts = ?2`，
+/// 当电脑从白天一直开到次日凌晨（每 30 分钟采样一次，始终满足 <6h），
+/// 会把昨天那唯一一条记录的 `ts` 一路往后推过午夜到次日，导致昨天的行程被彻底抹掉！
+/// 现在严格限定在**当前生效时区的同一自然日 `[day_start, day_end)`** 内去重，绝不跨日覆盖。
 pub fn insert_location(conn: &Connection, l: &NewLocation) -> rusqlite::Result<i64> {
     let is_trip = if l.is_trip { 1 } else { 0 };
-    // 最近 6 小时内已有同标签记录 → 不新增，但**必须刷新 is_trip**：
-    // 出差标记取决于常驻地，而常驻地会变（用户改设置、或统计推断翻过来）。
-    // 早期版本这里直接 return，导致改了常驻地后历史行仍标着旧结论。
-    let dup: i64 = conn.query_row(
-        "SELECT count(*) FROM locations WHERE label = ?1 AND ts > ?2",
-        params![l.label, l.ts - 6 * 3600],
-        |r| r.get(0),
-    )?;
-    if dup > 0 {
-        conn.execute(
-            "UPDATE locations SET is_trip = ?1, ts = ?2
-             WHERE id = (SELECT id FROM locations WHERE label = ?3 AND ts > ?4
-                         ORDER BY ts DESC LIMIT 1)",
-            params![is_trip, l.ts, l.label, l.ts - 6 * 3600],
-        )?;
-        return Ok(0);
+    let offset = crate::tz::offset_secs();
+    let local = l.ts + offset;
+    let day_start = (local - local.rem_euclid(86_400)) - offset;
+    let day_end = day_start + 86_400;
+
+    let same_day_last: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, COALESCE(label, '') FROM locations
+             WHERE ts >= ?1 AND ts < ?2
+             ORDER BY ts DESC LIMIT 1",
+            params![day_start, day_end],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+
+    if let Some((last_id, last_label)) = same_day_last {
+        if last_label == l.label {
+            conn.execute(
+                "UPDATE locations SET is_trip = ?1, ts = ?2 WHERE id = ?3",
+                params![is_trip, l.ts, last_id],
+            )?;
+            return Ok(0);
+        }
     }
     conn.execute(
         "INSERT INTO locations(ts, lat, lon, acc_m, source, label, is_trip)
@@ -870,6 +1066,7 @@ pub fn recent_locations(conn: &Connection, since: i64, limit: i64) -> rusqlite::
 }
 
 /// 把一批位置记录聚成「按天 + 按地点」的行程：同一天同一地点只留一条。
+/// 同时与 `day_profile` 的 `location` 做并集兜底，确保任何已记录在每日画像里的日期都不会缺失。
 ///
 /// **不能只按天聚合**：一天里跑两个城市（早上在深圳、下午飞上海）是出差场景的常态，
 /// 按天 GROUP 会随机丢掉一个，回答「那天我在哪」就错了一半。
@@ -879,16 +1076,31 @@ pub fn location_days(
     limit: i64,
 ) -> rusqlite::Result<Vec<(String, String, i64)>> {
     let tz_mod = crate::tz::sqlite_modifier();
+    let since_day = crate::tz::date_str(since);
+    let home = home_base(conn, since - 60 * 86_400)?.unwrap_or_default();
     let mut stmt = conn.prepare(
-        "SELECT substr(date(ts, 'unixepoch', ?3), 1, 10) AS day,
-                COALESCE(label, '') AS label, max(is_trip)
-         FROM locations WHERE ts >= ?1 AND COALESCE(label, '') <> ''
+        "SELECT day, label, max(is_trip) AS trip
+         FROM (
+           SELECT substr(date(ts, 'unixepoch', ?3), 1, 10) AS day,
+                  COALESCE(label, '') AS label,
+                  is_trip,
+                  ts AS sort_ts
+           FROM locations
+           WHERE ts >= ?1 AND COALESCE(label, '') <> ''
+           UNION ALL
+           SELECT day,
+                  COALESCE(location, '') AS label,
+                  CASE WHEN ?5 <> '' AND COALESCE(location, '') <> '' AND location <> ?5 THEN 1 ELSE 0 END AS is_trip,
+                  updated_at AS sort_ts
+           FROM day_profile
+           WHERE day >= ?4 AND COALESCE(location, '') <> ''
+         )
          GROUP BY day, label
-         ORDER BY day DESC, min(ts) DESC
+         ORDER BY day DESC, min(sort_ts) DESC
          LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map(params![since, limit, tz_mod], |r| {
+        .query_map(params![since, limit, tz_mod, since_day, home], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

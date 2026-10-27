@@ -452,18 +452,21 @@ pub fn record() -> serde_json::Value {
         )
     });
     match id {
-        Ok(n) if n > 0 => {
-            crate::startup_log(&format!("location recorded: {} trip={trip}", f.label));
-            // 当天画像打上位置（UPSERT 里空值不覆盖，所以这里可以放心写）
+        Ok(n) => {
+            if n > 0 {
+                crate::startup_log(&format!("location recorded: {} trip={trip}", f.label));
+            }
+            // 仅更新当天画像的位置列，避免用 Default 覆盖已算好的 active_sec / first_active
             let day = crate::logs::bj_date(now);
-            let p = crate::db::repo::DayProfile {
-                day,
-                location: f.label.clone(),
-                ..Default::default()
-            };
-            let _ = crate::db::with_conn(|c| crate::db::repo::upsert_day_profile(c, &p));
+            let lbl = f.label.clone();
+            let _ = crate::db::with_conn(|c| {
+                c.execute(
+                    "INSERT INTO day_profile(day, location, updated_at) VALUES(?1, ?2, ?3)
+                     ON CONFLICT(day) DO UPDATE SET location = excluded.location, updated_at = excluded.updated_at",
+                    rusqlite::params![day, lbl, now],
+                )
+            });
         }
-        Ok(_) => {}
         Err(e) => crate::startup_log(&format!("location write failed: {e}")),
     }
     serde_json::json!({

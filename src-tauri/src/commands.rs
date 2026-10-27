@@ -438,14 +438,20 @@ pub(crate) fn ai_task_sync(
     let tz_offset_min = crate::tz::resolve_booking_offset_min(&loc);
 
     let now = now_sec();
+    let rule_p = crate::todo::parse_in_tz(&draft.title, tz_offset_min)
+        .or_else(|| crate::todo::parse_in_tz(&draft.note, tz_offset_min))
+        .or_else(|| crate::todo::parse_in_tz(raw, tz_offset_min));
     let (fire_at, has_time) = if draft.in_minutes >= 0 {
         (now + draft.in_minutes * 60, true)
-    } else if let Some(p) = crate::todo::parse_in_tz(&draft.title, tz_offset_min)
-        .or_else(|| crate::todo::parse_in_tz(raw, tz_offset_min))
-    {
+    } else if let Some(ref p) = rule_p {
         (p.fire_at, !p.matched.is_empty())
     } else {
         (now + 30 * 60, false)
+    };
+    let recur_rule = if !draft.recur.is_empty() {
+        draft.recur.clone()
+    } else {
+        rule_p.as_ref().map(|p| p.recur_rule.clone()).unwrap_or_default()
     };
 
     // P1 高优任务设为硬提醒（level=1），中低优设为软提醒（level=0，受静默时段与打扰预算保护）
@@ -464,6 +470,7 @@ pub(crate) fn ai_task_sync(
                 note: note_combined.clone(),
                 location: loc,
                 tz_offset_min,
+                recur_rule: recur_rule.clone(),
             },
         )
     })?;
@@ -481,6 +488,8 @@ pub(crate) fn ai_task_sync(
         "duration_min": draft.duration_min,
         "priority": draft.priority,
         "note": draft.note,
+        "recur_rule": recur_rule,
+        "recur_label": db::repo::recur_label(&recur_rule),
         "has_time": has_time,
         "tz_offset_min": tz_offset_min,
         "city_mdhm": crate::tz::fmt_mdhm_with_offset(fire_at, active_tz.offset_min),
@@ -522,10 +531,15 @@ pub(crate) fn ai_task_from_clipboard_sync(
     }
     let bounded = crate::clipboard::truncate_chars(trimmed, MAX_LLM_INPUT_CHARS);
     let (scene, _, _) = llm::detect_scene(&bounded);
-    // 出差行程或含多步骤前置条件（「在此之前」「提前」「还要」）时，走多条目拆解管线（event + task），
-    // 并把拆解结果与工作负载评估一并推给宠物气泡。
+    let plan = crate::todo::analyze_work_plan(&bounded, crate::tz::offset_min());
+    // 出差行程、编号/多行任务清单（如「本周工作安排 1、... 2、...」）、或含多步骤前置条件（「在此之前」「提前」「还要」）时，
+    // 统一走多条目拆解管线（add_todo_sync），并把拆解结果与工作负载评估一并推给宠物气泡。
     let multi_cues = ["在此之前", "提前", "还要", "另外", "同时", "并且"];
-    if scene == "trip" || multi_cues.iter().any(|k| bounded.contains(k)) {
+    if scene == "trip"
+        || plan.is_multi_list
+        || bounded.lines().filter(|l| !l.trim().is_empty()).count() >= 2
+        || multi_cues.iter().any(|k| bounded.contains(k))
+    {
         let res = add_todo_sync(db, bounded, None)?;
         let ids: Vec<i64> = res["items"]
             .as_array()
@@ -571,12 +585,46 @@ pub(crate) async fn ai_task_from_clipboard(
 #[tauri::command]
 pub(crate) fn parse_todo(text: String) -> serde_json::Value {
     let active_tz = crate::tz::active();
+    let plan = crate::todo::analyze_work_plan(&text, active_tz.offset_min);
+    if plan.is_multi_list {
+        let anchor = plan.header_date_day_start.unwrap_or_else(crate::tz::day_start);
+        let first_fire = crate::todo::workday_slot_ts(anchor, 0, now_sec(), active_tz.offset_min);
+        let preview_titles: Vec<String> = plan
+            .raw_items
+            .iter()
+            .take(5)
+            .map(|s| crate::todo::clean_plan_item_title(s))
+            .collect();
+        return serde_json::json!({
+            "ok": true,
+            "is_multi_list": true,
+            "is_weekly_plan": plan.is_weekly_plan,
+            "multi_count": plan.raw_items.len(),
+            "preview_titles": preview_titles,
+            "fire_at": first_fire,
+            "title": preview_titles.first().cloned().unwrap_or_default(),
+            "matched": if !plan.header_date_matched.is_empty() {
+                plan.header_date_matched
+            } else if plan.is_weekly_plan {
+                "本周工作安排".to_string()
+            } else {
+                format!("{} 项清单", plan.raw_items.len())
+            },
+            "tz_offset_min": active_tz.offset_min,
+            "city_mdhm": crate::tz::fmt_mdhm_with_offset(first_fire, active_tz.offset_min),
+            "machine_mdhm": crate::tz::fmt_mdhm_with_offset(first_fire, active_tz.machine_offset_min),
+            "cross_hint": crate::tz::cross_tz_hint(first_fire, active_tz.offset_min),
+            "tz": active_tz,
+        });
+    }
     match crate::todo::parse(&text) {
         Some(p) => serde_json::json!({
             "ok": true,
             "fire_at": p.fire_at,
             "title": p.title,
             "matched": p.matched,
+            "recur_rule": p.recur_rule,
+            "recur_label": db::repo::recur_label(&p.recur_rule),
             "tz_offset_min": p.tz_offset_min,
             "city_mdhm": crate::tz::fmt_mdhm_with_offset(p.fire_at, active_tz.offset_min),
             "machine_mdhm": crate::tz::fmt_mdhm_with_offset(p.fire_at, active_tz.machine_offset_min),
@@ -602,6 +650,7 @@ fn rule_parse(raw: &str, fallback_minutes: Option<i64>) -> TodoFields {
             matched: p.matched,
             priority: 2,
             tz_offset_min: p.tz_offset_min,
+            recur_rule: p.recur_rule,
             ..Default::default()
         },
         None => TodoFields {
@@ -642,6 +691,104 @@ struct TodoFields {
     place: String,
     /// 簿记时的时区偏移（分钟，相对 UTC）
     tz_offset_min: i64,
+    /// 周期循环规则
+    recur_rule: String,
+}
+
+/// 提取文本中的英文/数字技术词元（小写，如 `["local", "vol", "heston", "slv", "pe-core", "gpu", "git"]`），
+/// 用于校验大模型在缩写标题时是否误吞了关键专业术语。
+fn extract_tech_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '+' {
+            cur.push(ch.to_ascii_lowercase());
+        } else if !cur.is_empty() {
+            if cur.chars().any(|c| c.is_ascii_alphabetic()) {
+                out.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+        }
+    }
+    if !cur.is_empty() && cur.chars().any(|c| c.is_ascii_alphabetic()) {
+        out.push(cur);
+    }
+    out
+}
+
+/// 判断大模型生成的 `ai_title` 是否丢失了原条目 `raw_item` 里的关键技术词，或使用了「三个模型」这类笼统替代词。
+fn title_lost_domain_terms(raw_item: &str, ai_title: &str) -> bool {
+    const VAGUE_WORDS: &[&str] = &["三个模型", "几个模型", "多个模型", "相关模型", "两个模型", "某系统", "某模块"];
+    if VAGUE_WORDS.iter().any(|w| ai_title.contains(w)) {
+        return true;
+    }
+    let raw_tokens = extract_tech_tokens(raw_item);
+    if raw_tokens.is_empty() {
+        return false;
+    }
+    let ai_lower = ai_title.to_ascii_lowercase();
+    // 只要原条目里有专有英文技术词（如 Local / Heston / SLV / pe-core / GPU / git）在 AI 标题里消失了，就判定为误吞
+    raw_tokens.iter().any(|tok| tok.len() >= 2 && !ai_lower.contains(tok))
+}
+
+/// 规则式解析多条目或单条目的统一入口
+fn rule_parse_plan_or_single(
+    raw: &str,
+    plan: &crate::todo::WorkPlanAnalysis,
+    default_tz_min: i64,
+    fallback_minutes: Option<i64>,
+) -> Vec<TodoFields> {
+    if !plan.is_multi_list {
+        return vec![rule_parse(raw, fallback_minutes)];
+    }
+    let now = now_sec();
+    let anchor = plan.header_date_day_start.unwrap_or_else(crate::tz::day_start);
+    let mut out = Vec::with_capacity(plan.raw_items.len());
+    for (idx, item_raw) in plan.raw_items.iter().enumerate() {
+        if let Some(p) = crate::todo::parse_in_tz(item_raw, default_tz_min) {
+            let clean_t = crate::todo::clean_plan_item_title(&p.title);
+            let pri = crate::todo::infer_item_priority(&clean_t);
+            out.push(TodoFields {
+                fire_at: p.fire_at,
+                title: clean_t,
+                matched: p.matched,
+                priority: pri,
+                tz_offset_min: p.tz_offset_min,
+                kind: "task".to_string(),
+                recur_rule: p.recur_rule,
+                ..Default::default()
+            });
+        } else {
+            let clean_t = crate::todo::clean_plan_item_title(item_raw);
+            let pri = crate::todo::infer_item_priority(&clean_t);
+            let (fire_at, matched) = if plan.is_weekly_plan || plan.header_date_day_start.is_some() {
+                (
+                    crate::todo::workday_slot_ts(anchor, idx, now, default_tz_min),
+                    if !plan.header_date_matched.is_empty() {
+                        plan.header_date_matched.clone()
+                    } else {
+                        "本周".to_string()
+                    },
+                )
+            } else {
+                (
+                    now + (fallback_minutes.unwrap_or(30) + (idx as i64) * 30) * 60,
+                    String::new(),
+                )
+            };
+            out.push(TodoFields {
+                fire_at,
+                title: clean_t,
+                matched,
+                priority: pri,
+                tz_offset_min: default_tz_min,
+                kind: "task".to_string(),
+                ..Default::default()
+            });
+        }
+    }
+    out
 }
 
 /// 解析并落库。识别不出时间时用 fallback_minutes（默认 30 分钟）兜底，
@@ -662,6 +809,7 @@ pub(crate) fn add_todo_sync(
     // 表现为 /todo/add 一直挂到 HTTP 超时（实测踩到）。
     let loc = crate::location::current_label();
     let default_tz_min = crate::tz::resolve_booking_offset_min(&loc);
+    let plan = crate::todo::analyze_work_plan(raw, default_tz_min);
 
     // 大模型优先，而且**允许一句话拆成多条**。
     // 「后天去深圳出差，在此之前还要订机票和酒店」是两件事：
@@ -675,32 +823,190 @@ pub(crate) fn add_todo_sync(
 
     if crate::llm::api_key(&f).is_some() && !f.model.trim().is_empty() {
         match llm::extract_tasks(&f, raw) {
-            Ok(list) => {
+            Ok(mut list) => {
                 source = "ai";
-                for it in list {
+                let now = now_sec();
+
+                // 若输入是明确的编号清单（如 1、... 2、... 3、... 4、... 5、...）：
+                // 1) 过滤掉模型误把标题行（「本周工作安排」）当成任务输出的条目；
+                // 2) 若模型漏拆或把同一序号拆成了多条，按原编号清单对齐修正，确保 1 对 1 准确对应。
+                if plan.is_multi_list {
+                    list.retain(|it| {
+                        let t = it.title.trim();
+                        !(t.contains("本周工作安排") || t.contains("周工作安排") || t == plan.header_author)
+                    });
+
+                    if list.len() != plan.raw_items.len() {
+                        let mut aligned: Vec<llm::TaskItem> = Vec::with_capacity(plan.raw_items.len());
+                        let mut used = vec![false; list.len()];
+                        for raw_item in &plan.raw_items {
+                            let clean_raw = crate::todo::clean_plan_item_title(raw_item);
+                            let raw_tokens = extract_tech_tokens(raw_item);
+                            // 寻找最匹配的 AI 条目
+                            let mut best_idx: Option<usize> = None;
+                            let mut best_score = 0usize;
+                            for (i, cand) in list.iter().enumerate() {
+                                if used[i] {
+                                    continue;
+                                }
+                                let mut score = 0usize;
+                                for ch in clean_raw.chars().filter(|c| !c.is_whitespace()) {
+                                    if cand.title.contains(ch) {
+                                        score += 1;
+                                    }
+                                }
+                                for tok in &raw_tokens {
+                                    if cand.title.to_ascii_lowercase().contains(tok) {
+                                        score += 5;
+                                    }
+                                }
+                                if score > best_score {
+                                    best_score = score;
+                                    best_idx = Some(i);
+                                }
+                            }
+                            if let Some(bi) = best_idx.filter(|_| best_score >= 2) {
+                                used[bi] = true;
+                                aligned.push(list[bi].clone());
+                            } else {
+                                aligned.push(llm::TaskItem {
+                                    kind: "task".to_string(),
+                                    title: clean_raw.clone(),
+                                    when: String::new(),
+                                    duration_min: 0,
+                                    priority: crate::todo::infer_item_priority(&clean_raw),
+                                    who: String::new(),
+                                    location: String::new(),
+                                    note: String::new(),
+                                    recur: String::new(),
+                                });
+                            }
+                        }
+                        list = aligned;
+                    }
+                }
+
+                let anchor = plan.header_date_day_start.unwrap_or_else(crate::tz::day_start);
+
+                for (idx, mut it) in list.into_iter().enumerate() {
+                    // 修正 1：若标题行含作者本人（如「杨帆」）和常驻地（「北京」），绝不把作者本人当外部协作对象 `who`，也不把常驻地当出差
+                    if !plan.header_author.is_empty()
+                        && (it.who == plan.header_author || it.who.contains(&plan.header_author))
+                    {
+                        it.who.clear();
+                    }
+                    if !plan.header_city.is_empty()
+                        && it.location == plan.header_city
+                        && !raw.contains("出差")
+                        && !raw.contains("飞")
+                    {
+                        it.location.clear();
+                        it.kind = "task".to_string();
+                    }
+
+                    // 修正 2：对编号清单中的每一项，检查模型是否误吞了英文专业术语（如把 Local Vol / Heston / SLV 缩写成「三个模型」），
+                    // 并清理「开始设计…中的产品结构设计」这类语病重复。
+                    it.title = crate::todo::clean_plan_item_title(&it.title);
+                    if plan.is_multi_list {
+                        if let Some(raw_item) = plan.raw_items.get(idx) {
+                            if title_lost_domain_terms(raw_item, &it.title) {
+                                it.title = crate::todo::clean_plan_item_title(raw_item);
+                            }
+                            // 若原条目包含阻塞性环境/故障词，确保优先级体现
+                            if crate::todo::infer_item_priority(raw_item) == 1 && it.priority > 1 {
+                                it.priority = 1;
+                            }
+                            // 跨天研发任务若原文未提分钟/小时，不展示模型凭空猜的预估分钟数
+                            if !raw_item.contains("分钟") && !raw_item.contains("小时") {
+                                it.duration_min = 0;
+                            }
+                        }
+                    }
+
                     let item_place = if it.location.trim().is_empty() {
                         loc.clone()
                     } else {
                         it.location.trim().to_string()
                     };
                     let item_tz = crate::tz::resolve_booking_offset_min(&item_place);
-                    // 单条时间解析：先尝试按该条目所在城市时区解析 YYYY-MM-DD HH:MM，
-                    // 若模型未给或给了相对词，再回落到本地规则解析器（支持「明天早晨」「明天中午」等）
                     let mut matched = String::new();
+
+                    // 若是周工作计划且子条目自身不含具体时间，优先检查模型给的 when 是否合理
+                    let item_raw_ref = plan.raw_items.get(idx).map(|s| s.as_str()).unwrap_or("");
+                    let item_has_own_time = !item_raw_ref.is_empty()
+                        && crate::todo::parse_in_tz(item_raw_ref, item_tz).is_some();
+
                     let parsed = crate::tz::parse_datetime_in_tz(&it.when, item_tz).or_else(|| {
                         crate::todo::parse_in_tz(&it.when, item_tz)
                             .or_else(|| crate::todo::parse_in_tz(&it.title, item_tz))
-                            .or_else(|| crate::todo::parse_in_tz(raw, item_tz))
+                            .or_else(|| {
+                                if !plan.is_multi_list {
+                                    crate::todo::parse_in_tz(raw, item_tz)
+                                } else {
+                                    None
+                                }
+                            })
                             .map(|p| {
                                 matched = p.matched;
                                 p.fire_at
                             })
                     });
-                    if parsed.is_some() {
+
+                    let mut fire = if let Some(ts) = parsed {
                         time_ok = true;
+                        ts
+                    } else if plan.is_weekly_plan || plan.header_date_day_start.is_some() {
+                        time_ok = true;
+                        matched = plan.header_date_matched.clone();
+                        crate::todo::workday_slot_ts(anchor, idx, now, item_tz)
+                    } else {
+                        now + fallback_minutes.unwrap_or(30) * 60
+                    };
+
+                    // 修正 3：周计划任务若未显式提及周末，严禁排在周六(6)/周日(0)（例如模型误排到 10-31 周六），
+                    // 或若模型给的默认当天 10:00 已经早于当前时刻（刚添加就变「已到点」），自动对齐到合理工作日时段。
+                    if (plan.is_weekly_plan || plan.header_date_day_start.is_some()) && !item_has_own_time {
+                        let wd = crate::todo::weekday_in_tz(fire, item_tz);
+                        let mentions_weekend = item_raw_ref.contains("周六")
+                            || item_raw_ref.contains("周日")
+                            || item_raw_ref.contains("周末");
+                        if (!mentions_weekend && matches!(wd, 0 | 6)) || fire <= now + 60 {
+                            fire = crate::todo::workday_slot_ts(anchor, idx, now, item_tz);
+                            time_ok = true;
+                        }
+                    } else if fire <= now + 60 && parsed.is_some() {
+                        // 单条任务只写了今天日期（默认 10:00）但现在已过 10:00 → 顺延到今天接下来的工作时段
+                        let today_start = crate::tz::day_start();
+                        if fire >= today_start {
+                            fire = crate::todo::workday_slot_ts(today_start, 0, now, item_tz);
+                        }
                     }
-                    let fire =
-                        parsed.unwrap_or_else(|| now_sec() + fallback_minutes.unwrap_or(30) * 60);
+
+                    // 若条目或备注中明确写了「本周内 / 这周内 / 本周完成 / 本周截止 / 本周五」，
+                    // 防止 AI 误把标题行的周一日期当作截止日，强制对齐到本周五 10:00。
+                    let combined_text = format!("{} {} {} {}", it.title, it.note, it.when, item_raw_ref);
+                    let says_within_week = [
+                        "本周内", "这周内", "本周完成", "这周完成", "本周截止", "这周截止", "本周底", "本周五",
+                    ]
+                    .iter()
+                    .any(|kw| combined_text.contains(kw));
+                    if says_within_week && crate::todo::weekday_in_tz(fire, item_tz) != 5 {
+                        if let Some(p_fri) = crate::todo::parse_in_tz("本周五上午10点", item_tz) {
+                            fire = p_fri.fire_at;
+                            matched = "本周内（周五截止）".to_string();
+                            time_ok = true;
+                        }
+                    }
+
+                    // 周期规则：优先取 AI 识别出的 recur，否则用规则从原句/备注里提取（如「每天」「每日签到」「每个工作日」）
+                    let item_recur = if !it.recur.is_empty() {
+                        it.recur.clone()
+                    } else if let Some(rm) = crate::todo::find_recurrence(&combined_text) {
+                        rm.rule
+                    } else {
+                        String::new()
+                    };
+
                     fields.push(TodoFields {
                         fire_at: fire,
                         title: it.title,
@@ -711,22 +1017,35 @@ pub(crate) fn add_todo_sync(
                         kind: it.kind,
                         place: it.location,
                         tz_offset_min: item_tz,
+                        recur_rule: item_recur,
                     });
+                }
+
+                // 修正 4：若是周计划且模型把多条任务全部塞在了同一个时间戳（例如全定在周一 10:00），
+                // 自动按工作日顺序铺开到周一至周五，方便每日跟进提醒。
+                if (plan.is_weekly_plan || plan.header_date_day_start.is_some()) && fields.len() >= 2 {
+                    let first_ts = fields[0].fire_at;
+                    let all_same_ts = fields.iter().all(|f| (f.fire_at - first_ts).abs() < 60);
+                    if all_same_ts {
+                        for (idx, fld) in fields.iter_mut().enumerate() {
+                            fld.fire_at = crate::todo::workday_slot_ts(anchor, idx, now, fld.tz_offset_min);
+                        }
+                    }
                 }
             }
             Err(e) => {
                 startup_log(&format!("todo: ai parse failed ({e}), fallback to rule"));
-                fields.push(rule_parse(raw, fallback_minutes));
+                fields = rule_parse_plan_or_single(raw, &plan, default_tz_min, fallback_minutes);
             }
         }
     } else {
-        fields.push(rule_parse(raw, fallback_minutes));
+        fields = rule_parse_plan_or_single(raw, &plan, default_tz_min, fallback_minutes);
     }
 
     // 规则路径没有绝对时间，靠「有没有匹配到时间片段」判断；
     // AI 路径在分支里已经设过 time_ok，不要覆盖。
     if source == "rule" {
-        time_ok = !fields[0].matched.is_empty();
+        time_ok = fields.iter().any(|f| !f.matched.is_empty());
     }
 
     let active_tz = crate::tz::active();
@@ -763,15 +1082,17 @@ pub(crate) fn add_todo_sync(
                     note: fld.note.clone(),
                     location: place,
                     tz_offset_min: tz_min,
+                    recur_rule: fld.recur_rule.clone(),
                 },
             )
         })?;
         let _ = db.with(|c| db::repo::log_task_event(c, Some(id), "created", None, &fld.title));
         startup_log(&format!(
-            "todo added: #{id} '{}' at {} tz={} (source={source}, kind={})",
+            "todo added: #{id} '{}' at {} tz={} recur={} (source={source}, kind={})",
             fld.title,
             fld.fire_at,
             crate::tz::format_utc_label(tz_min),
+            fld.recur_rule,
             if fld.kind.is_empty() { "task" } else { &fld.kind }
         ));
         created.push(serde_json::json!({
@@ -782,6 +1103,8 @@ pub(crate) fn add_todo_sync(
             "location": fld.place,
             "duration_min": fld.duration_min,
             "priority": fld.priority,
+            "recur_rule": fld.recur_rule,
+            "recur_label": db::repo::recur_label(&fld.recur_rule),
             "who_in_note": fld.note.starts_with("对象："),
             "tz_offset_min": tz_min,
             "city_mdhm": crate::tz::fmt_mdhm_with_offset(fld.fire_at, active_tz.offset_min),
@@ -928,12 +1251,37 @@ pub(crate) fn add_reminder(
     fire_at: i64,
     level: Option<i64>,
     kind: Option<i64>,
+    recur_rule: Option<String>,
 ) -> Result<i64, String> {
     let t = title.trim();
     if t.is_empty() {
         return Err("标题不能为空".into());
     }
-    db.with(|c| db::repo::add_reminder(c, t, fire_at, level.unwrap_or(1), kind.unwrap_or(0)))
+    let rule = recur_rule
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let final_rule = if !rule.is_empty() {
+        rule
+    } else {
+        crate::todo::find_recurrence(t)
+            .map(|r| r.rule)
+            .unwrap_or_default()
+    };
+    db.with(|c| {
+        db::repo::add_reminder_full(
+            c,
+            &db::repo::NewReminder {
+                title: t.to_string(),
+                fire_at,
+                level: level.unwrap_or(1),
+                kind: kind.unwrap_or(0),
+                tz_offset_min: crate::tz::offset_min(),
+                recur_rule: final_rule,
+                ..Default::default()
+            },
+        )
+    })
 }
 
 #[tauri::command]
@@ -943,6 +1291,7 @@ pub(crate) fn list_reminders(db: tauri::State<db::Db>) -> Result<Vec<db::repo::R
 
 /// 标完成。顺带记一笔生命周期——「提醒后多久才处理」就是从这里来的，
 /// 不记的话「处理时机」这个维度根本无从量化。
+/// 若该待办是周期任务，`set_reminder_status` 会自动将其推进到下一周期并保持 `status = 0`。
 #[tauri::command]
 pub(crate) fn complete_reminder(
     app: tauri::AppHandle,
@@ -951,7 +1300,13 @@ pub(crate) fn complete_reminder(
 ) -> Result<bool, String> {
     let ok = db.with(|c| db::repo::set_reminder_status(c, id, 2))?;
     if ok {
-        let _ = db.with(|c| db::repo::log_task_event(c, Some(id), "done", None, ""));
+        let _ = db.with(|c| {
+            let _ = db::repo::log_task_event(c, Some(id), "done", None, "");
+            if db::repo::overdue_count(c, now_sec()).unwrap_or(0) == 0 {
+                let _ = db::repo::clear_risk_kind(c, "overdue");
+            }
+            Ok(())
+        });
         let _ = app.emit("wm:reminders-changed", ());
     }
     Ok(ok)
@@ -1435,7 +1790,7 @@ pub(crate) fn today_summary_sync(db: &db::Db) -> Result<TodaySummary, String> {
         };
         Ok((
             pending,
-            param_q("SELECT count(*) FROM reminders WHERE kind = 0 AND status = 2 AND done_at >= ?1")?,
+            param_q("SELECT count(*) FROM reminders WHERE kind = 0 AND done_at IS NOT NULL AND done_at >= ?1")?,
             param_q("SELECT count(*) FROM reminders WHERE kind = 1 AND fired_at >= ?1")?,
             param_q("SELECT count(*) FROM reminders WHERE kind = 2 AND fired_at >= ?1")?,
         ))
@@ -1870,6 +2225,20 @@ pub(crate) fn alert_close(app: tauri::AppHandle) {
     }
 }
 
+/// 重新打开最近一次提醒。关闭弹窗只隐藏窗口，不应让提醒失去入口。
+#[tauri::command]
+pub(crate) fn alert_reopen(app: tauri::AppHandle) -> Result<bool, String> {
+    let payload = last_alert_cell()
+        .lock()
+        .map_err(|_| "提醒状态锁不可用".to_string())?
+        .clone();
+    if payload.is_null() {
+        return Ok(false);
+    }
+    push_alert_window(&app, payload);
+    Ok(true)
+}
+
 #[tauri::command]
 pub(crate) fn alert_complete(
     app: tauri::AppHandle,
@@ -1883,6 +2252,12 @@ pub(crate) fn alert_complete(
             done_cnt += 1;
         }
     }
+    let _ = db.with(|c| {
+        if db::repo::overdue_count(c, now_sec()).unwrap_or(0) == 0 {
+            let _ = db::repo::clear_risk_kind(c, "overdue");
+        }
+        Ok(())
+    });
     let _ = app.emit("wm:reminders-changed", ());
     if done_cnt > 0 {
         let msg = if done_cnt == 1 {
@@ -1925,5 +2300,165 @@ pub(crate) fn alert_snooze(
         let _ = app.emit("wm:answer", &msg);
     }
     Ok(cnt)
+}
+
+/* ------------------------------ 桌宠左键单击：按真实场景生成台词 ------------------------------ */
+
+#[tauri::command]
+pub(crate) fn pet_tap_line(db: tauri::State<db::Db>, seq: Option<u32>) -> String {
+    let now = now_sec();
+    let tz_off = crate::tz::offset_secs();
+    let sod = (now + tz_off).rem_euclid(86_400);
+    let hour = sod / 3600;
+    let minute = (sod % 3600) / 60;
+    let hm_now = format!("{hour:02}:{minute:02}");
+    let day_start = now - sod;
+    let today_str = crate::logs::bj_date(now);
+
+    let sit_min = crate::perception::current_sit_mins();
+    let fst = crate::focus::status();
+    let cur_cat = crate::perception::current_category();
+
+    let (focus_min, top_cat, done_today, intr_today, reminders) = db
+        .with(|c| {
+            let cats = db::repo::day_summary(c, day_start, day_start + 86_400).unwrap_or_default();
+            let f_sec: i64 = cats.iter().map(|r| r.focus_sec).sum();
+            let f_min = (f_sec as f64 / 60.0).round() as i64;
+            let top = cats
+                .first()
+                .map(|r| crate::memory::cat_label(r.app_cat))
+                .unwrap_or("日常工作");
+            let done = db::repo::done_since(c, day_start).unwrap_or(0);
+            let intr = db::repo::read_interrupt(c, &today_str).unwrap_or(0);
+            let rms = db::repo::list_reminders(c).unwrap_or_default();
+            Ok((f_min, top, done, intr, rms))
+        })
+        .unwrap_or((0, "日常工作", 0, 0, Vec::new()));
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // 1) 正在进行 50 分钟专注
+    if fst.active {
+        let done_m = fst.active_secs / 60;
+        let left_m = ((fst.target_secs - fst.active_secs).max(0) + 59) / 60;
+        if fst.im_interrupts > 0 {
+            lines.push(format!(
+                "🎯 正在专注中（已专注 {done_m} 分钟，还剩 {left_m} 分钟 · 期间拦截切屏 {} 次），稳住节奏～",
+                fst.im_interrupts
+            ));
+        } else {
+            lines.push(format!(
+                "🎯 50 分钟专注进行中（已进行 {done_m} 分钟，还剩 {left_m} 分钟），软提醒已自动替你静音拦截。"
+            ));
+        }
+    }
+
+    // 2) 连续久坐/深度专注提醒
+    if sit_min >= 90 {
+        lines.push(format!(
+            "🧘 你已经连续工作 {sit_min} 分钟没离开座位了，起来倒杯水、活动一下肩颈吧！"
+        ));
+    } else if sit_min >= 45 {
+        lines.push(format!(
+            "☕ 这一段已经连续专注 {sit_min} 分钟啦，节奏很稳，注意眨眨眼放松一下～"
+        ));
+    }
+
+    // 3) 待办与近期日程提醒（即将到点 / 已提醒待处理 / 今日待办）
+    let overdue_items: Vec<&db::repo::Reminder> =
+        reminders.iter().filter(|r| r.status == 1).collect();
+    let due_soon: Option<&db::repo::Reminder> = reminders
+        .iter()
+        .filter(|r| r.status == 0 && r.fire_at >= now && r.fire_at - now <= 3600)
+        .min_by_key(|r| r.fire_at);
+    let next_pending: Option<&db::repo::Reminder> = reminders
+        .iter()
+        .filter(|r| r.status == 0 && r.fire_at > now)
+        .min_by_key(|r| r.fire_at);
+
+    if let Some(soon) = due_soon {
+        let mins_left = ((soon.fire_at - now).max(60) + 59) / 60;
+        lines.push(format!(
+            "⏰ 还有 {mins_left} 分钟就到「{}」了，我帮你盯着时间呢。",
+            crate::clipboard::truncate_chars(&soon.title, 18)
+        ));
+    }
+    if !overdue_items.is_empty() {
+        let first_t = crate::clipboard::truncate_chars(&overdue_items[0].title, 16);
+        if overdue_items.len() == 1 {
+            lines.push(format!(
+                "📌 「{first_t}」已经到点提醒过了，做完记得在面板里勾掉它～"
+            ));
+        } else {
+            lines.push(format!(
+                "📌 手头有「{first_t}」等 {} 项到点待办，先挑最顺手的一件解决掉吧。",
+                overdue_items.len()
+            ));
+        }
+    } else if let Some(next_r) = next_pending {
+        let next_hm = crate::tz::fmt_mdhm_with_offset(next_r.fire_at, (tz_off / 60) as i64);
+        let recur_tag = if !next_r.recur_rule.is_empty() {
+            format!(" [🔁{}]", db::repo::recur_label(&next_r.recur_rule))
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "📋 手头共 {} 项待办，下一项是 {next_hm} 的「{}」{recur_tag}。",
+            reminders.len(),
+            crate::clipboard::truncate_chars(&next_r.title, 16)
+        ));
+    }
+
+    // 4) 时段与当前工作状态感知
+    if !(5..23).contains(&hour) {
+        lines.push(format!(
+            "🌙 已经 {hm_now} 了，今天累计活跃 {focus_min} 分钟，早点保存收工休息吧，明天精神更好。"
+        ));
+    } else if (5..9).contains(&hour) {
+        lines.push(format!(
+            "🌅 早安！现在是 {hm_now}，今天开工很早呀，先把最重要的一件事跑通～"
+        ));
+    } else if (12..13).contains(&hour) {
+        lines.push(format!(
+            "🍱 午休时间到啦（上午已专注 {focus_min} 分钟），先去吃饭休息会儿吧！"
+        ));
+    } else if (18..23).contains(&hour) {
+        if done_today > 0 {
+            lines.push(format!(
+                "🌆 今天已活跃 {focus_min} 分钟（主要在{top_cat}），完成了 {done_today} 项待办，辛苦啦！"
+            ));
+        } else {
+            lines.push(format!(
+                "🌆 今天已累计专注 {focus_min} 分钟（主要在{top_cat}），看看还有没有要收尾的事项～"
+            ));
+        }
+    }
+
+    // 5) 当前前台分类 / 专注与打断实况
+    if cur_cat == crate::perception::AppCategory::Meeting {
+        lines.push("🎧 检测到你正在开会，非紧急提醒已自动静音避让。".to_string());
+    } else if focus_min > 0 {
+        let intr_part = if intr_today == 0 {
+            "，目前 0 次打断，状态很专注".to_string()
+        } else {
+            format!("，中途被打断 {intr_today} 次")
+        };
+        lines.push(format!(
+            "📊 今日已累计活跃 {focus_min} 分钟（重心在{top_cat}{intr_part}）{}。",
+            if done_today > 0 {
+                format!("，已完成 {done_today} 项待办")
+            } else {
+                String::new()
+            }
+        ));
+    } else {
+        lines.push(
+            "💡 选中任何聊天/邮件文字按 Ctrl+C，再按 Ctrl+Shift+T 就能让 AI 自动拆解待办或周计划。"
+                .to_string(),
+        );
+    }
+
+    let idx = (seq.unwrap_or(0) as usize) % lines.len().max(1);
+    lines.into_iter().nth(idx).unwrap_or_else(|| "我在呢，随时叫我～".to_string())
 }
 

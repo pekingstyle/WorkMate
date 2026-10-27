@@ -1033,6 +1033,8 @@ pub struct TaskDraft {
     /// 规则解析器最常错的就是这个字段，所以单独抽出来。
     pub who: String,
     pub note: String,
+    /// 周期规则："" / "daily" / "workdays" / "weekly" / "monthly"
+    pub recur: String,
 }
 
 /// 让模型把一段话抽成结构化待办。
@@ -1055,26 +1057,28 @@ pub fn extract_task(f: &LlmFile, text: &str) -> Result<TaskDraft, String> {
     let system = format!(
         "你是待办抽取器。用户会给一段话（聊天记录、邮件、会议纪要里的一句都有可能）。\
          从中抽出一个待办，**只输出 JSON**，不要代码块、不要解释：\
-         {{\"title\":\"不超过 20 字的动作短语（要说清楚做什么，含对象和交付物）\",\
+         {{\"title\":\"不超过 36 字的动作短语（要说清楚做什么，完整保留原话里的英文模型名、系统名、版本号与技术术语，绝不要把具体名词缩写成'三个模型'这类笼统词）\",\
          \"in_minutes\":从现在起多少分钟后提醒(整数；原文没提时间就填 -1；\
-         说\"明天早晨\"\"明天中午\"\"明天上午10点\"这类请严格按用户所在城市时区换算成相对现在的分钟数),\
-         \"duration_min\":预估需要多少分钟(没提就 0),\
+         说\"明天早晨\"\"明天中午\"\"明天上午10点\"这类请严格按用户所在城市时区换算成相对现在的分钟数；\
+         注意：若说\"本周内\"\"本周完成\"\"本周截止\"，截止日应算到本周五 10:00，绝不能算到周一！),\
+         \"duration_min\":预估需要多少分钟(单次可完成的短任务才填分钟数，跨天/周计划或没提就填 0),\
          \"priority\":1或2或3(1=高 2=中 3=低),\
-         \"who\":\"涉及的人、团队或系统，例如 张总 / 产品组 / 风控部；没有就填空串\",\
-         \"note\":\"原文里的补充信息；没有就填空串\"}}\
+         \"who\":\"涉及的外部协作人或团队，例如 张总 / 产品组 / 风控部；注意标题行里的计划制定人自己绝不能填进 who，没有外部对象就填空串\",\
+         \"note\":\"原文里的补充信息；没有就填空串\",\
+         \"recur\":\"若是定期循环任务则填 daily(每天)/workdays(每个工作日)/weekly(每周)/monthly(每月)，单次任务填空串\"}}\
          时间换算基准：{tz_ctx}\
          口语时段缺省时刻（若只说时段未说具体几点）：清晨=07:30、早晨/早上=08:30、上午=10:00、中午=12:00、下午=15:00、傍晚/下班前=18:00、晚上=20:00、睡前=22:30、凌晨=01:00。\
          「in_minutes」必须基于上述基准时间精确换算，不要凭空给值。"
     );
 
-    let raw = chat_with_budget(f, &system, src, 500, 0.1)?;
+    let raw = chat_with_budget(f, &system, src, 600, 0.1)?;
     parse_task_json(&raw)
 }
 
 /* -------------------------- 多条目抽取（面板待办用） -------------------------- */
 
 /// 一条被拆出来的待办或日程。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Default)]
 pub struct TaskItem {
     /// "event"（有明确发生时刻：出差/开会/拜访）或 "task"（要动手做的事）
     pub kind: String,
@@ -1086,6 +1090,8 @@ pub struct TaskItem {
     pub who: String,
     pub location: String,
     pub note: String,
+    /// 周期循环规则："" / "daily" / "workdays" / "weekly" / "monthly"
+    pub recur: String,
 }
 
 /// 把一句话拆成多条待办/日程。
@@ -1106,31 +1112,36 @@ pub fn extract_tasks(f: &LlmFile, text: &str) -> Result<Vec<TaskItem>, String> {
 
     let tz_ctx = crate::tz::prompt_time_context();
     let system = format!(
-        "你是待办与日程抽取器。用户会给一句话，里面可能有多件事\
-         （例如一个行程，加上出行前必须完成的准备）。\
+        "你是待办与日程抽取器。用户会给一段话或工作计划清单，里面可能有一件或多件事\
+         （例如周工作安排 `1、... 2、... 3、...`，或一个出差行程加上出行前必须完成的准备）。\
          请拆成 JSON，只输出 JSON，不要代码块、不要解释：\
          {{\"items\":[{{\
          \"type\":\"event 或 task\",\
-         \"title\":\"不超过 20 字、能独立看懂的动作短语\",\
-         \"when\":\"YYYY-MM-DD HH:MM（按用户当前所在城市当地时间；原文没提时间就填空串）\",\
-         \"duration_min\":预估需要多少分钟(整数，0=不知道),\
-         \"priority\":1或2或3(1=高 2=中 3=低),\
-         \"who\":\"涉及的人或机构，没有就填空串\",\
-         \"location\":\"城市名，没有就填空串\",\
-         \"note\":\"补充信息，没有就填空串\"\
+         \"title\":\"不超过 36 字、能独立看懂的清晰短语（必须完整保留原文中的专业术语、英文模型名如 Local Vol / Heston Model / SLV Model、项目版本号如 pe-core 2.0、技术栈如 Git / GPU，严禁把具体名称笼统概括成'三个模型'或'相关问题'；消除'开始设计…中的产品结构设计'这类首尾语病重复）\",\
+         \"when\":\"YYYY-MM-DD HH:MM（按用户当前所在城市当地时间；原文没提时间就填空串；若提了'本周内''本周完成''本周截止'，when 必须定在本周五 10:00，绝不能定在周一！）\",\
+         \"duration_min\":预估需要多少分钟(整数，单次会议或短事务才填，跨天研发任务或不确定一律填 0),\
+         \"priority\":1或2或3(1=高：阻塞性环境问题/线上故障/紧急交付；2=中：常规核心研发/模型答疑/架构设计；3=低),\
+         \"who\":\"涉及的外部协作人或机构，没有就填空串（注意：计划标题如'本周工作安排 - 杨帆（北京）'中的'杨帆'是作者本人，绝不能填进 who！）\",\
+         \"location\":\"仅当属于异地出差/拜访时填目的地城市名；标题行里作者常驻地如'（北京）'不是出差，填空串\",\
+         \"note\":\"补充信息，没有就填空串\",\
+         \"recur\":\"若是定期循环任务则填 daily(每天)/workdays(每个工作日)/weekly(每周)/monthly(每月)，单次任务填空串\"\
          }}]}}。\
          规则：\
-         1) 有明确发生时刻的（出差、开会、拜访、聚餐）用 event；需要动手完成的用 task。\
-         2) 「在此之前」「提前」「先」这类前置要求必须单独拆成 task，\
+         1) 有明确发生时刻的（出差、开会、拜访、聚餐）用 event；需要动手完成的研发/跟进/设计工作一律用 task。\
+         2) 若原文是带序号的清单（如 `1、... 2、... 3、... 4、... 5、...`）：\
+            - 标题行（如 `2026.10.26 本周工作安排 - 杨帆（北京）`）只提供背景日期，绝不要把标题行本身当成一条任务；\
+            - 每个序号条目必须严格 1 对 1 拆为一条独立 task，绝不遗漏任何序号，也绝不把同一序号内的并列动作（如「问题解决和解答」「架构优化和功能迭代」）拆成两条重复记录；\
+            - 若是「本周工作安排 / 周计划」且各序号未写具体几点，请从标题基准日（或本周首个未过时的工作日）起，按顺序将各条任务均匀排在周一至周五的工作日 10:00（若当天已过 10:00 则排 14:00），绝不要排到周六或周日！若某条明确写了「本周内完成 / 本周截止」，则应排在本周五 10:00。\
+         3) 「在此之前」「提前」「先」这类前置要求必须单独拆成 task，\
             且它的 when 要早于对应的 event（一般提前一天）。\
-         3) 口语时段缺省时刻（若只说时段未说具体几点）：清晨=07:30、早晨/早上/明早=08:30、上午=10:00、中午=12:00、下午=15:00、傍晚/下班前=18:00、晚上/今晚/明晚=20:00、睡前=22:30、凌晨=01:00。\
-         4) 只说日期没说任何时段或时刻：event 用当天 09:00，task 用当天 10:00。\
-         5) 同一件事不要拆成重复条目；确实只有一件事就只输出一个元素。\
+         4) 口语时段缺省时刻（若只说时段未说具体几点）：清晨=07:30、早晨/早上/明早=08:30、上午=10:00、中午=12:00、下午=15:00、傍晚/下班前=18:00、晚上/今晚/明晚=20:00、睡前=22:30、凌晨=01:00。\
+         5) 单条任务若只说日期没说任何时段或时刻：event 用当天 09:00，task 用当天 10:00。\
+         6) 同一件事不要拆成重复条目；确实只有一件事就只输出一个元素。\
          时间换算基准：{tz_ctx}\
          when 必须基于上述用户所在城市的基准时间换算，且必须是完整日期（YYYY-MM-DD HH:MM），不能写「后天」「明天」这类相对词。"
     );
 
-    let raw = chat_with_budget(f, &system, src, 900, 0.1)?;
+    let raw = chat_with_budget(f, &system, src, 1400, 0.1)?;
     parse_tasks_json(&raw)
 }
 
@@ -1322,6 +1333,18 @@ fn flex_priority(v: &serde_json::Value) -> i64 {
     2
 }
 
+fn normalize_recur(v: &serde_json::Value) -> String {
+    let s = v.as_str().unwrap_or("").trim().to_ascii_lowercase();
+    match s.as_str() {
+        "daily" | "day" | "每天" | "每日" => "daily".to_string(),
+        "workdays" | "workday" | "weekdays" | "每个工作日" | "工作日" => "workdays".to_string(),
+        "weekly" | "week" | "每周" => "weekly".to_string(),
+        "monthly" | "month" | "每月" => "monthly".to_string(),
+        _ if s.starts_with("every:") && s.ends_with('d') => s,
+        _ => String::new(),
+    }
+}
+
 /// 解析 items。兼容三种形状：
 ///   ① `{"items":[...]}`（当前提示词）② `[...]`（模型直接给数组）
 ///   ③ `{"title":...}`（旧版单任务格式，mock 与旧用例仍会产生）
@@ -1388,6 +1411,7 @@ fn parse_tasks_json(raw: &str) -> Result<Vec<TaskItem>, String> {
             who: it["who"].as_str().unwrap_or("").trim().to_string(),
             location: it["location"].as_str().unwrap_or("").trim().to_string(),
             note: it["note"].as_str().unwrap_or("").trim().to_string(),
+            recur: normalize_recur(&it["recur"]),
         });
     }
     if out.is_empty() {
@@ -1417,6 +1441,7 @@ fn parse_task_json(raw: &str) -> Result<TaskDraft, String> {
         // 对象缺字段是常态（模型经常省掉空字段），空串即可，不是错误
         who: v["who"].as_str().unwrap_or("").trim().to_string(),
         note: v["note"].as_str().unwrap_or("").trim().to_string(),
+        recur: normalize_recur(&v["recur"]),
     })
 }
 

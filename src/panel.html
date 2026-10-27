@@ -11,15 +11,15 @@
       "Microsoft YaHei", system-ui, sans-serif;
     /* ClickUp 风格：冷调浅底 + 品牌紫，配粉→紫渐变做品牌识别。
        与原先的奶油底 + 陶土橙（偏 Claude）完全区分开。 */
-    --bg: #F7F8FC;
-    --card: #FFFFFF;
-    --line: #E7E8F2;
+    --bg: #F1F1FB;
+    --card: rgba(255,255,255,.68);
+    --line: rgba(118,117,170,.19);
     --text: #1E1E2E;
     --muted: #6B6B85;
     --accent: #7B68EE;      /* ClickUp 品牌紫 */
     --accent-deep: #5B4BD6; /* 深紫：白字压得住的那一档（对比 6:1） */
     --bar: #EAEBF5;
-    --soft: #F0F1F9;        /* 浅冷底：hover / 徽章 / 代码 */
+    --soft: rgba(255,255,255,.52);        /* 玻璃内层 */
     --brand-grad: linear-gradient(90deg, #FB4570 0%, #7B68EE 100%);
     /* 按钮专用渐变：两端都压深，保证白字可读（亮色渐变直接放白字会掉到 3.4:1） */
     --btn-grad: linear-gradient(90deg, #D63A85 0%, #5B4BD6 100%);
@@ -30,15 +30,25 @@
   body {
     margin: 0;
     padding: 16px 18px 22px;
-    background: var(--bg);
+    background:
+      radial-gradient(460px 260px at 100% -5%, rgba(123,104,238,.34), transparent 70%),
+      radial-gradient(380px 260px at -12% 32%, rgba(251,69,112,.22), transparent 72%),
+      linear-gradient(145deg, #F7F7FD 0%, #EEEFFC 48%, #F8F5FC 100%);
     color: var(--text);
     font: 400 13px/1.6 var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
   /* 标题做成品牌渐变字：ClickUp 的标志性观感。
      用 background-clip 上色而不是直接写 color，文字仍旧是真文本（可选中、可缩放）。 */
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
   h1 {
-    margin: 0 0 2px;
+    margin: 0;
     font-size: 15px;
     font-weight: 600;
     letter-spacing: .01em;
@@ -47,12 +57,21 @@
     background-clip: text;
     color: transparent;
   }
+  .title-clock {
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
   .card {
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 13px 15px;
     margin-bottom: 11px;
+    box-shadow: 0 12px 28px rgba(77,71,138,.07), inset 0 1px 0 rgba(255,255,255,.8);
+    backdrop-filter: blur(18px) saturate(125%);
+    -webkit-backdrop-filter: blur(18px) saturate(125%);
   }
   .card h2 .h2-sub { float: right; font-weight: 400; color: #8A8AA5; }
   .card h2 {
@@ -81,6 +100,8 @@
     margin-bottom: 3px;
     font-variant-numeric: tabular-nums;
   }
+  .bar-sub { color: var(--muted); font-weight: 400; margin-left: 5px; font-size: 10px; }
+  .coding-track { box-shadow: inset 0 0 0 1px rgba(91,92,226,.12); }
   .bar-track {
     height: 6px;
     background: var(--bar);
@@ -187,24 +208,54 @@
   }
 
   .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* Glass UI material：移植 @glass-ui/button 的 regular / tinted control 规则。
+     双层渐变分别负责内层 wash 和高光 rim，按钮本身不依赖霓虹伪元素。 */
   button {
-    padding: 6px 11px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: #fff;
+    --lg-base: rgba(255,255,255,.42);
+    --lg-tint: transparent;
+    --lg-tint-amt: 0%;
+    --lg-wash: color-mix(in srgb, var(--lg-tint) var(--lg-tint-amt), var(--lg-base));
+    --lg-rim-hi: rgba(255,255,255,.80);
+    --lg-rim-lo: rgba(255,255,255,.18);
+    --lg-highlight: rgba(255,255,255,.60);
+    --lg-drop: rgba(15,23,42,.14);
+    position: relative;
+    min-height: 34px;
+    padding: 7px 13px;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    background:
+      linear-gradient(var(--lg-wash), var(--lg-wash)) padding-box,
+      linear-gradient(135deg, var(--lg-rim-hi), var(--lg-rim-lo) 35%, var(--lg-rim-lo) 65%, var(--lg-rim-hi)) border-box;
     color: var(--text);
     font: inherit;
     font-size: 12px;
     cursor: pointer;
+    backdrop-filter: blur(16px) saturate(180%);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    box-shadow: inset 0 1px 0 var(--lg-highlight), 0 2px 8px rgba(57,52,108,.08);
+    transition: transform .18s ease, box-shadow .18s ease, background .18s ease;
   }
-  button:hover { background: var(--soft); }
+  button:hover {
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.82), 0 4px 12px rgba(57,52,108,.12);
+  }
+  button:active { transform: scale(.98); box-shadow: inset 0 2px 4px rgba(0,0,0,.12), 0 1px 3px rgba(57,52,108,.08); }
+  button:focus-visible { outline: 3px solid rgba(123,104,238,.32); outline-offset: 2px; }
   button.primary {
-    background: var(--btn-grad);
-    border-color: transparent;
+    --lg-base: rgba(255,255,255,.30);
+    --lg-tint: #7B68EE;
+    --lg-tint-amt: 55%;
     color: #fff;
-    font-weight: 500;
+    font-weight: 600;
+    border-color: rgba(255,255,255,.62);
+    background: linear-gradient(180deg, #9184F4 0%, #7667E5 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.52), 0 5px 14px rgba(104,89,214,.24);
   }
-  button.primary:hover { filter: brightness(1.07); }
+  button.primary:hover { filter: brightness(1.04); box-shadow: inset 0 1px 0 rgba(255,255,255,.65), 0 7px 18px rgba(104,89,214,.3); }
+  button.secondary-action { opacity: .62; box-shadow: none; }
+  button:not([data-tab]) { white-space: nowrap; }
+  #btn-focus-toggle { min-width: 92px; padding: 9px 13px !important; white-space: nowrap; }
+  @media (prefers-reduced-motion: reduce) { button { transition: none; } button:active { transform: none; } }
 
   code {
     background: var(--soft);
@@ -242,15 +293,75 @@
   .rm-list { margin-top: 10px; }
   .rm-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
-    padding: 7px 0;
+    padding: 8px 0;
     border-bottom: 1px dashed var(--line);
   }
   .rm-item:last-child { border-bottom: none; }
   .rm-main { flex: 1; min-width: 0; }
-  .rm-title { font-size: 12.5px; }
-  .rm-meta { font-size: 11px; color: var(--muted); }
+  .rm-title {
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1.45;
+    word-break: break-word;
+    color: var(--text);
+  }
+  .rm-note {
+    font-size: 11px;
+    color: #64748B;
+    margin-top: 2px;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .rm-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+    line-height: 1.4;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+  }
+  .rm-pri {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 4px;
+    margin-right: 5px;
+    vertical-align: 1px;
+  }
+  .rm-pri.hi { background: #FEE2E2; color: #DC2626; }
+  .rm-pri.med { background: #EEF2FF; color: #4F46E5; }
+  .rm-pri.lo { background: #F1F5F9; color: #64748B; }
+  .rm-parse-box {
+    margin-top: 6px;
+    padding: 6px 9px;
+    border-radius: 7px;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .rm-parse-box .rp-head {
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 3px;
+  }
+  .rm-parse-box .rp-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 1px 0;
+  }
+  .rm-parse-box .rp-time {
+    flex: none;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
   .rm-item.done .rm-title { text-decoration: line-through; color: #A5A5BD; }
   .rm-item.fired .rm-title { color: var(--accent); }
   .rm-act {
@@ -261,6 +372,7 @@
     cursor: pointer;
     padding: 3px 5px;
     border-radius: 5px;
+    margin-top: 1px;
   }
   .rm-act:hover { background: var(--soft); color: var(--text); }
   .rm-empty { font-size: 12px; color: #8A8AA5; }
@@ -334,29 +446,35 @@
     min-height: 16px;
   }
 
-  /* Tab 导航：把「报告 / 操作 / 配置 / 技术」分开，避免一进来就是配置参数 */
+  /* Tab 参考示例的“平面列表 + 当前项浮起”：它是导航，不是操作按钮。 */
   .tabs {
     display: flex;
-    gap: 4px;
-    margin: 4px 0 12px;
-    border-bottom: 1px solid var(--line);
+    gap: 3px;
+    margin: 5px 0 14px;
+    padding: 3px 2px;
+    border-bottom: 1px solid rgba(118,117,170,.16);
   }
   .tabs button {
+    position: relative;
+    flex: 1;
     border: 0;
     background: transparent;
-    padding: 7px 10px 8px;
-    font-size: 12.5px;
+    padding: 7px 8px;
+    font-size: 12px;
     color: var(--muted);
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
+    border-radius: 13px;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    transform: none !important;
+    transition: color .18s ease, background .18s ease, box-shadow .18s ease, transform .18s ease;
   }
-  .tabs button:hover { background: transparent; color: var(--text); }
-  /* 激活 Tab 的下划线走品牌渐变。border-image 只能作用在被单独指定的那条边上，
-     所以先给四边留 2px 透明底、再用 border-image 只渲染下边。 */
+  .tabs button:hover { background: rgba(255,255,255,.38); color: var(--text); box-shadow: none; }
   .tabs button.on {
     color: var(--text);
-    border-bottom: 2px solid transparent;
-    border-image: var(--brand-grad) 1;
+    background: rgba(255,255,255,.78);
+    box-shadow: 6px 7px 14px rgba(83,78,155,.13), -5px -5px 12px rgba(255,255,255,.9), inset 0 1px 0 rgba(255,255,255,.98);
+    font-weight: 600;
   }
 
   .llm-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -534,13 +652,71 @@
   .log-item a { color: var(--accent); text-decoration: none; cursor: pointer; }
   .log-item a:hover { text-decoration: underline; }
   .log-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .work-trend { display: grid; gap: 8px; }
+  .trend-legend { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--muted); font-size: 11px; flex-wrap: wrap; }
+  .trend-legend-group { display: inline-flex; gap: 13px; align-items: center; }
+  .trend-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .trend-key { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .trend-key.active { background: #6F63E8; }
+  .trend-key.interrupt { background: #F08A73; }
+  .trend-chart { width: 100%; height: 214px; display: block; overflow: visible; user-select: none; }
+  .trend-grid { stroke: rgba(109,105,161,.14); stroke-width: 1; }
+  .trend-axis { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .trend-axis-active { fill: #5B50D6; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trend-axis-intr { fill: #D96B52; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trend-area { fill: url(#trendArea); }
+  .trend-line-active { fill: none; stroke: #6F63E8; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+  .trend-line-interrupt { fill: none; stroke: #F08A73; stroke-width: 1.9; stroke-dasharray: 4 4; stroke-linecap: round; stroke-linejoin: round; }
+  .trend-point-active { fill: #fff; stroke: #6F63E8; stroke-width: 2; transition: r .12s ease; }
+  .trend-point-interrupt { fill: #fff; stroke: #F08A73; stroke-width: 1.8; transition: r .12s ease; }
+  .trend-cursor { stroke: rgba(111,99,232,.42); stroke-width: 1.2; stroke-dasharray: 3 3; pointer-events: none; }
+  .trend-hit { fill: transparent; cursor: pointer; }
+  .trend-cats { display: grid; gap: 5px; margin-top: 2px; }
+  .trend-cat-row { display: grid; grid-template-columns: 44px 1fr 44px; gap: 8px; align-items: center; padding: 2px 4px; border-radius: 6px; transition: background .12s ease; cursor: pointer; }
+  .trend-cat-row:hover, .trend-cat-row.is-active { background: rgba(111,99,232,.09); }
+  .trend-cat-day { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .trend-cat-row.is-active .trend-cat-day { color: var(--accent); font-weight: 600; }
+  .trend-cat-dur { color: var(--muted); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+  .trend-cat-track { height: 9px; display: flex; overflow: hidden; border-radius: 999px; background: rgba(109,105,161,.1); }
+  .trend-cat-seg { min-width: 3px; height: 100%; transition: filter .12s ease; }
+  .trend-cat-seg:hover { filter: brightness(1.12) saturate(1.15); }
+  .rm-recur {
+    display: inline-block; margin-right: 5px; padding: 1px 6px; border-radius: 999px;
+    font-size: 10px; font-weight: 600; background: #EDE9FE; color: #5B21B6; vertical-align: 1px;
+  }
+  .quick select {
+    border: 1px solid rgba(255,255,255,.78);
+    border-radius: 999px;
+    padding: 5px 10px;
+    font-size: 11.5px;
+    color: var(--text);
+    background: rgba(255,255,255,.72);
+    outline: none;
+    cursor: pointer;
+  }
+  .location-timeline { margin-top: 10px; display: grid; gap: 7px; max-height: 360px; overflow: auto; padding-right: 3px; }
+  .location-month { border: 1px solid rgba(118,117,170,.15); border-radius: 12px; background: rgba(255,255,255,.35); overflow: hidden; }
+  .location-month summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 9px 10px; color: var(--text); font-size: 12px; font-weight: 600; }
+  .location-month summary::-webkit-details-marker { display: none; }
+  .location-month summary::before { content: "›"; color: var(--accent); font-size: 17px; line-height: 1; transition: transform .16s ease; }
+  .location-month[open] summary::before { transform: rotate(90deg); }
+  .location-month summary .month-meta { margin-left: auto; color: var(--muted); font-size: 10.5px; font-weight: 400; }
+  .location-month-list { display: grid; gap: 5px; padding: 0 7px 7px; }
+  .location-day { display: grid; grid-template-columns: 70px 10px 1fr auto; gap: 8px; align-items: center; padding: 7px 8px; border: 1px solid rgba(118,117,170,.13); border-radius: 9px; background: rgba(255,255,255,.45); }
+  .location-date { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .location-dot { width: 8px; height: 8px; border-radius: 50%; background: #94A3B8; box-shadow: 0 0 0 3px rgba(148,163,184,.15); }
+  .location-day.trip .location-dot { background: #FB4570; box-shadow: 0 0 0 3px rgba(251,69,112,.15); }
+  .location-place { min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .location-tag { color: #C02664; background: #FCE7F3; border-radius: 999px; padding: 1px 6px; font-size: 10px; white-space: nowrap; }
+  .secondary-action { opacity: .72; }
 </style>
 </head>
 <body>
-  <h1>WorkMate</h1>
+  <div class="title-row"><h1>WorkMate</h1><span class="title-clock" id="title-clock">当前 —</span></div>
 
   <nav class="tabs">
     <button data-tab="today" class="on">今日</button>
+    <button data-tab="trends">趋势</button>
     <button data-tab="todo">待办</button>
     <button data-tab="assistant">LLM API</button>
     <button data-tab="memory">记忆</button>
@@ -555,8 +731,6 @@
         <div class="today-num"><b id="td-focus">—</b><span>专注分钟</span></div>
         <div class="today-num"><b id="td-pending">—</b><span>待办</span></div>
         <div class="today-num"><b id="td-done">—</b><span>已完成</span></div>
-        <div class="today-num"><b id="td-water">—</b><span>喝水</span></div>
-        <div class="today-num"><b id="td-stand">—</b><span>站起</span></div>
       </div>
       <div class="today-cats" id="td-cats"></div>
       <div class="tz-bar" id="td-focus-bar" style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;gap:8px">
@@ -586,9 +760,16 @@
     <div class="card">
       <h2>近 24 小时分布 <span class="h2-sub" id="bars-total"></span></h2>
       <div class="bars" id="bars">
-        <div class="empty">暂无数据，去「技术」页生成模拟数据</div>
+        <div class="empty">暂无数据。WorkMate 在后台每 5 秒采样一次，正常使用几分钟后会自动出现。</div>
       </div>
       <div class="hint">统计口径：每 5 秒采样一次，键鼠未闲置超过 1 分钟即计 5 秒活跃时长。</div>
+    </div>
+  </section>
+
+  <section data-pane="trends" hidden>
+    <div class="card trend-card">
+      <h2>工作趋势 <span class="h2-sub">近 14 天</span></h2>
+      <div id="work-trend" class="work-trend"><div class="empty">正在读取每日画像…</div></div>
     </div>
   </section>
 
@@ -596,19 +777,24 @@
   <section data-pane="todo" hidden>
     <div class="card">
       <h2>待办提醒</h2>
-      <div class="tz-bar" id="rm-tz-bar">
-        <span id="rm-tz-text">🌏 计时基准：<b>中国标准时间 (UTC+8)</b></span>
-      </div>
       <div class="add-row">
-        <input id="rm-title" type="text" placeholder="明天早晨提醒我发周报 / 明天中午对齐需求" maxlength="80" />
+        <input id="rm-title" type="text" placeholder="输入单条待办，或直接粘贴周工作安排（1、… 2、…）批量拆解" maxlength="1200" />
         <button class="primary" id="rm-add">添加</button>
       </div>
-      <div class="hint" id="rm-parse">支持按当前城市时间识别「明天早晨」「明天中午」「今晚8点」「30分钟后」</div>
+      <div class="hint" id="rm-parse">支持按当前城市时间识别「明天早晨」「每周五下午4点」「每天14:10」「本周内完成」</div>
       <div class="quick">
         <button data-min="30">30 分钟后</button>
         <button data-min="60">1 小时后</button>
         <button data-min="180">3 小时后</button>
         <input id="rm-time" type="datetime-local" title="按当前所在城市时区选择提醒时刻" />
+        <select id="rm-recur" title="选择定期重复周期（也可直接在输入框写“每天/每个工作日/每周/每月”）">
+          <option value="">单次提醒</option>
+          <option value="daily">🔁 每天</option>
+          <option value="workdays">🔁 每个工作日</option>
+          <option value="weekly">🔁 每周</option>
+          <option value="monthly">🔁 每月</option>
+        </select>
+        <button id="rm-reopen" title="重新显示最近一次自动提醒">重新打开最近提醒</button>
       </div>
       <div id="rm-list" class="rm-list"></div>
     </div>
@@ -694,20 +880,15 @@
     <div class="card">
       <h2>位置与出差</h2>
       <div class="row"><span class="k">当前位置</span><span class="v" id="loc-now">—</span></div>
-      <div class="row"><span class="k">生效时区</span><span class="v" id="loc-tz">—</span></div>
       <div class="row"><span class="k">来源</span><span class="v" id="loc-src">—</span></div>
       <div class="row"><span class="k">常驻地</span><span class="v" id="loc-home">—</span></div>
       <div class="add-row">
         <input id="loc-input" type="text" placeholder="手填城市，如：上海" maxlength="40" />
         <button class="primary" id="loc-save">设为位置</button>
       </div>
-      <div class="actions">
-        <button id="loc-refresh">立即定位</button>
-        <button id="loc-ashome">把当前位置设为常驻地</button>
-        <button id="loc-clear">清除轨迹</button>
-      </div>
+      <div class="actions"><button id="loc-refresh">立即定位</button><button id="loc-ashome">把当前位置设为常驻地</button><button id="loc-clear">清除轨迹</button></div>
       <div class="hint">定位优先用 Windows 定位服务，取不到可用手填。与常驻地不同即记为出差。</div>
-      <div id="loc-trips" class="rm-list"></div>
+      <div id="loc-trips" class="location-timeline"></div>
     </div>
 
     <div class="card">
@@ -734,7 +915,7 @@
       <h2>习惯与风险</h2>
       <div class="hb-grid">
         <div class="hb-kpi"><b id="hb-samples">—</b><span>样本天数</span></div>
-        <div class="hb-kpi"><b id="hb-span">—</b><span>平均开工 / 收工</span></div>
+        <div class="hb-kpi"><b id="hb-span">—</b><span>典型开工 / 收工</span></div>
         <div class="hb-kpi"><b id="hb-active">—</b><span>日均活跃</span></div>
       </div>
       <div class="hb-sec">
@@ -754,7 +935,7 @@
         <button id="mem-scan">重新检查风险</button>
         <button id="mem-rebuild">重算每日画像</button>
       </div>
-      <div class="hint">「习惯」按当前生效城市时区自然日统计得出；风险每 10 分钟自动巡检一次。</div>
+      <div class="hint">「习惯」仅统计<b>工作日（周一至周五）</b>并过滤凌晨跨午夜残留，周末晚起不会拉偏开工时间。<br />「风险」采用分级策略：高优风险（高优/批量待办逾期、连续久坐 ≥2 小时）每 30 分钟巡检并定期提醒（演示模式与开会中自动避让）；中低优趋势风险每 60 分钟巡检一次，仅在面板展示。</div>
     </div>
 
     <div class="card">
@@ -804,12 +985,11 @@
     <div class="card">
       <h2>自检</h2>
       <div class="actions">
-        <button class="primary" id="btn-gen">生成 48 条模拟数据</button>
-        <button id="btn-rollup">立即聚合</button>
+        <button class="primary" id="btn-rollup">立即聚合</button>
         <button id="btn-refresh">刷新</button>
         <button id="btn-reset">清空统计</button>
       </div>
-      <div class="hint">模拟数据会混入「今日概览」与分布图，验证完点「清空统计」归零。</div>
+      <div class="hint">聚合会把最新感知明细整理进查询桶；清空统计只用于维护本地感知数据。</div>
       <div class="toast" id="toast"></div>
     </div>
   </section>

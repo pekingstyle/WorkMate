@@ -700,20 +700,21 @@ pub fn prompt_time_context() -> String {
     }
 }
 
-/// 解析当前生效时区（或指定时区）下的 `"YYYY-MM-DD HH:MM"` / `"YYYY-MM-DDTHH:MM"` / `"YYYY/MM/DD HH:MM"` → UTC 时间戳（秒）
+/// 解析当前生效时区（或指定时区）下的 `"YYYY-MM-DD HH:MM"` / `"YYYY-MM-DDTHH:MM"` / `"YYYY/MM/DD HH:MM"` / `"YYYY.MM.DD HH:MM"` → UTC 时间戳（秒）
 pub fn parse_datetime_in_tz(s: &str, tz_min: i64) -> Option<i64> {
     let t = s.trim();
     if t.is_empty() {
         return None;
     }
     let normalized = t.replace('/', "-");
-    let (d, hm) = if let Some((d, h)) = normalized.split_once(' ') {
+    let (d_raw, hm) = if let Some((d, h)) = normalized.split_once(' ') {
         (d.trim(), h.trim())
     } else if let Some((d, h)) = normalized.split_once('T') {
         (d.trim(), h.trim())
     } else {
         (normalized.as_str(), "09:00")
     };
+    let d = d_raw.replace('.', "-");
     let mut dp = d.split('-');
     let y: i64 = dp.next()?.trim().parse().ok()?;
     let mo: i64 = dp.next()?.trim().parse().ok()?;

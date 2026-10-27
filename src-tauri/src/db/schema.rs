@@ -297,6 +297,11 @@ const V9: &str = r#"
 ALTER TABLE reminders ADD COLUMN tz_offset_min INTEGER NOT NULL DEFAULT 480;
 "#;
 
+/// v10：待办支持周期循环规则（recur_rule: ''=单次, 'daily'=每天, 'workdays'=每个工作日, 'weekly'=每周, 'monthly'=每月, 'every:Nd'=每N天）。
+const V10: &str = r#"
+ALTER TABLE reminders ADD COLUMN recur_rule TEXT NOT NULL DEFAULT '';
+"#;
+
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
@@ -343,6 +348,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if version < 9 {
         conn.execute_batch(V9)?;
         conn.pragma_update(None, "user_version", 9)?;
+    }
+
+    if version < 10 {
+        let _ = conn.execute_batch(V10);
+        conn.pragma_update(None, "user_version", 10)?;
     }
 
     Ok(())

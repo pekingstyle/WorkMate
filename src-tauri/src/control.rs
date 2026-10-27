@@ -784,7 +784,8 @@ fn route(method: &str, path: &str, query: &str, body: &str, app: &tauri::AppHand
             let fire_at = q.get("fire_at").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
             let level = q.get("level").and_then(|s| s.parse::<i64>().ok());
             let kind = q.get("kind").and_then(|s| s.parse::<i64>().ok());
-            match crate::commands::add_reminder(app.state::<crate::db::Db>(), title, fire_at, level, kind) {
+            let recur = q.get("recur").cloned();
+            match crate::commands::add_reminder(app.state::<crate::db::Db>(), title, fire_at, level, kind, recur) {
                 Ok(id) => ok(json!(id)),
                 Err(e) => err(&e),
             }

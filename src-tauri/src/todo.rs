@@ -28,6 +28,8 @@ pub struct Parsed {
     pub matched: String,
     /// 簿记时所依据的时区偏移（分钟，如 UTC+8 为 480）
     pub tz_offset_min: i64,
+    /// 周期循环规则：""=单次, "daily"=每天, "workdays"=每个工作日, "weekly"=每周, "monthly"=每月, "every:Nd"=每N天
+    pub recur_rule: String,
 }
 
 fn now_sec() -> i64 {
@@ -93,7 +95,7 @@ fn is_num_char(c: char) -> bool {
 fn is_false_hour_unit(text: &str, num_start: usize, unit_pos: usize, unit: &str) -> bool {
     let after = &text[unit_pos + unit.len()..];
     if unit == "时" {
-        for bad_suffix in ["候", "间", "代", "期", "刻", "常", "机", "效", "差"] {
+        for bad_suffix in ["候", "间", "代", "期", "刻", "常", "机", "效", "差", "计", "算", "延", "同", "临"] {
             if after.starts_with(bad_suffix) {
                 return true;
             }
@@ -104,8 +106,11 @@ fn is_false_hour_unit(text: &str, num_start: usize, unit_pos: usize, unit: &str)
         }
     }
     if unit == "点" {
-        // "一点点"、"差点"、"早点休息"（早点前无数字，已在调用处过滤，但 "一点小事" 需过滤）
-        for bad_suffix in ["点", "心", "子", "滴", "缀", "评", "赞", "击", "亮", "头", "燃", "菜", "餐"] {
+        // "一点点"、"差点"、"早点休息"、"三点建议"、"两点问题"（非时刻量词过滤）
+        for bad_suffix in [
+            "点", "心", "子", "滴", "缀", "评", "赞", "击", "亮", "头", "燃", "菜", "餐",
+            "建", "要", "意", "看", "想", "总", "方", "内", "修", "改", "任", "思", "汇", "说", "体",
+        ] {
             if after.starts_with(bad_suffix) {
                 return true;
             }
@@ -333,38 +338,62 @@ struct DateMatch {
     implied_period: Option<(&'static str, i64, i64)>,
 }
 
-/// 识别显式公历日期：`YYYY-MM-DD` 或 `M月D日/号`
+/// 识别显式公历日期：`YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` 或 `M月D日/号`
 fn find_explicit_date(text: &str, day_start: i64, tz_secs: i64) -> Option<DateMatch> {
     let (cur_y, _, _, _, _, _) = tz::epoch_to_civil(day_start + tz_secs);
 
-    // 1) YYYY-MM-DD
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
-    if chars.len() >= 10 {
-        for win in chars.windows(10) {
-            let start_b = win[0].0;
-            let end_b = win[9].0 + win[9].1.len_utf8();
-            let s = &text[start_b..end_b];
-            let b = s.as_bytes();
-            if b.len() == 10 && (b[4] == b'-' || b[4] == b'/') && b[7] == b[4] {
-                if let (Ok(y), Ok(m), Ok(d)) = (
-                    s[0..4].parse::<i64>(),
-                    s[5..7].parse::<i64>(),
-                    s[8..10].parse::<i64>(),
-                ) {
-                    if let Some(target_utc) = tz::civil_to_epoch_secs(y, m, d, 0, 0, 0) {
-                        let target_day_start = target_utc - tz_secs;
-                        let off = (target_day_start - day_start).div_euclid(86_400);
-                        return Some(DateMatch {
-                            day_offset: off,
-                            start: start_b,
-                            end: end_b,
-                            is_same_weekday_candidate: false,
-                            implied_period: None,
-                        });
+    // 1) YYYY[-/.]M(M)[-/.]D(D)（支持 2026-10-26、2026/10/26、2026.10.26、2026.5.6）
+    let b = text.as_bytes();
+    let len = b.len();
+    let mut i = 0usize;
+    while i + 8 <= len {
+        if b[i].is_ascii_digit()
+            && b[i + 1].is_ascii_digit()
+            && b[i + 2].is_ascii_digit()
+            && b[i + 3].is_ascii_digit()
+            && (i == 0 || !b[i - 1].is_ascii_digit())
+        {
+            let sep = b[i + 4];
+            if sep == b'-' || sep == b'/' || sep == b'.' {
+                let mut j = i + 5;
+                while j < len && j < i + 7 && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 5 && j < len && b[j] == sep {
+                    let m_end = j;
+                    let d_start = j + 1;
+                    let mut k = d_start;
+                    while k < len && k < d_start + 2 && b[k].is_ascii_digit() {
+                        k += 1;
+                    }
+                    // 确保日后面不再紧跟数字或同分隔符（避免误匹配 IP 地址如 2026.1.1.1）
+                    let valid_tail = k > d_start
+                        && (k == len || (!b[k].is_ascii_digit() && b[k] != sep));
+                    if valid_tail {
+                        if let (Ok(y), Ok(m), Ok(d)) = (
+                            text[i..i + 4].parse::<i64>(),
+                            text[i + 5..m_end].parse::<i64>(),
+                            text[d_start..k].parse::<i64>(),
+                        ) {
+                            if (2000..=2100).contains(&y) {
+                                if let Some(target_utc) = tz::civil_to_epoch_secs(y, m, d, 0, 0, 0) {
+                                    let target_day_start = target_utc - tz_secs;
+                                    let off = (target_day_start - day_start).div_euclid(86_400);
+                                    return Some(DateMatch {
+                                        day_offset: off,
+                                        start: i,
+                                        end: k,
+                                        is_same_weekday_candidate: false,
+                                        implied_period: None,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+        i += 1;
     }
 
     // 2) M月D日 / M月D号
@@ -496,6 +525,40 @@ fn find_date(text: &str, day_start: i64, tz_secs: i64) -> Option<DateMatch> {
         }
     }
 
+    // 4.5) 「本周内 / 这周内 / 本周完成 / 本周截止 / 本周底 / 周末前」→ 统一对齐到本周五（weekday = 5）
+    // 修复用户反馈：带有「本周内完成」的任务应当默认截止在本周五，而非被当作周一立刻判逾期。
+    for kw in [
+        "本周五前",
+        "这周五前",
+        "周五之前",
+        "周五前",
+        "本周内",
+        "这周内",
+        "本周完成",
+        "这周完成",
+        "本周截止",
+        "这周截止",
+        "本周底",
+        "这周底",
+        "周末前",
+    ] {
+        if let Some(pos) = text.find(kw) {
+            let today_dow0 = (((day_start + tz_secs).div_euclid(86_400)) + 4).rem_euclid(7); // 0=周日, 1..6=周一..周六
+            let ahead = if (1..=5).contains(&today_dow0) {
+                5 - today_dow0
+            } else {
+                (5 - today_dow0).rem_euclid(7)
+            };
+            return Some(DateMatch {
+                day_offset: ahead,
+                start: pos,
+                end: pos + kw.len(),
+                is_same_weekday_candidate: ahead == 0,
+                implied_period: None,
+            });
+        }
+    }
+
     // 5) 周几（周三 / 星期五 / 下周一 / 下下周三）
     if let Some((idx, start, end, weeks_ahead)) = find_weekday(text) {
         let today_dow0 = (((day_start + tz_secs).div_euclid(86_400)) + 4).rem_euclid(7); // 0=周日, 1..6=周一..周六
@@ -521,6 +584,155 @@ fn find_date(text: &str, day_start: i64, tz_secs: i64) -> Option<DateMatch> {
     None
 }
 
+/// 周期规则匹配结果
+#[derive(Debug, Clone)]
+pub struct RecurMatch {
+    /// "daily" | "workdays" | "weekly" | "monthly" | "every:Nd"
+    pub rule: String,
+    pub start: usize,
+    pub end: usize,
+    /// 若是「每周X」，附带周几 (0=周日..6=周六)
+    pub weekday: Option<i64>,
+    /// 若是「每月X号/日」，附带几号 (1..=31)
+    pub month_day: Option<i64>,
+}
+
+/// 识别句子中的周期循环表达（每天 / 每个工作日 / 每周X / 每月X号 / 每N天）
+pub fn find_recurrence(text: &str) -> Option<RecurMatch> {
+    // 1) 每个工作日 / 工作日每天
+    for kw in ["每个工作日", "每工作日", "工作日每天", "工作日每日"] {
+        if let Some(pos) = text.find(kw) {
+            return Some(RecurMatch {
+                rule: "workdays".to_string(),
+                start: pos,
+                end: pos + kw.len(),
+                weekday: None,
+                month_day: None,
+            });
+        }
+    }
+
+    // 2) 每周X / 每星期X / 每礼拜X
+    for prefix in ["每星期", "每礼拜", "每周"] {
+        if let Some(pos) = text.find(prefix) {
+            let after = &text[pos + prefix.len()..];
+            if let Some(ch) = after.chars().next() {
+                let wd = match ch {
+                    '一' => Some(1),
+                    '二' => Some(2),
+                    '三' => Some(3),
+                    '四' => Some(4),
+                    '五' => Some(5),
+                    '六' => Some(6),
+                    '日' | '天' => Some(0),
+                    _ => None,
+                };
+                if let Some(w) = wd {
+                    return Some(RecurMatch {
+                        rule: "weekly".to_string(),
+                        start: pos,
+                        end: pos + prefix.len() + ch.len_utf8(),
+                        weekday: Some(w),
+                        month_day: None,
+                    });
+                }
+            }
+            return Some(RecurMatch {
+                rule: "weekly".to_string(),
+                start: pos,
+                end: pos + prefix.len(),
+                weekday: None,
+                month_day: None,
+            });
+        }
+    }
+
+    // 3) 每月X号/日 或 每月
+    for prefix in ["每个月", "每月"] {
+        if let Some(pos) = text.find(prefix) {
+            let after = &text[pos + prefix.len()..];
+            let d_len: usize = after
+                .chars()
+                .take_while(|c| is_num_char(*c))
+                .map(|c| c.len_utf8())
+                .sum();
+            if d_len > 0 {
+                let after_d = &after[d_len..];
+                if after_d.starts_with('号') || after_d.starts_with('日') {
+                    let suf_len = '号'.len_utf8();
+                    if let Some(day) = cn_num(&after[..d_len]) {
+                        if (1..=31).contains(&day) {
+                            return Some(RecurMatch {
+                                rule: "monthly".to_string(),
+                                start: pos,
+                                end: pos + prefix.len() + d_len + suf_len,
+                                weekday: None,
+                                month_day: Some(day),
+                            });
+                        }
+                    }
+                }
+            }
+            return Some(RecurMatch {
+                rule: "monthly".to_string(),
+                start: pos,
+                end: pos + prefix.len(),
+                weekday: None,
+                month_day: None,
+            });
+        }
+    }
+
+    // 4) 每N天 / 每隔N天
+    for prefix in ["每隔", "每"] {
+        for (pos, _) in text.match_indices(prefix) {
+            let after = &text[pos + prefix.len()..];
+            let d_len: usize = after
+                .chars()
+                .take_while(|c| is_num_char(*c))
+                .map(|c| c.len_utf8())
+                .sum();
+            if d_len > 0 {
+                let after_d = &after[d_len..];
+                if after_d.starts_with('天') || after_d.starts_with('日') {
+                    let suf_len = '天'.len_utf8();
+                    if let Some(n) = cn_num(&after[..d_len]) {
+                        if (1..=365).contains(&n) {
+                            let rule = if n == 1 {
+                                "daily".to_string()
+                            } else {
+                                format!("every:{n}d")
+                            };
+                            return Some(RecurMatch {
+                                rule,
+                                start: pos,
+                                end: pos + prefix.len() + d_len + suf_len,
+                                weekday: None,
+                                month_day: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5) 每天 / 每日
+    for kw in ["每天", "每日"] {
+        if let Some(pos) = text.find(kw) {
+            return Some(RecurMatch {
+                rule: "daily".to_string(),
+                start: pos,
+                end: pos + kw.len(),
+                weekday: None,
+                month_day: None,
+            });
+        }
+    }
+
+    None
+}
+
 /// 解析入口（默认使用系统底层当前生效的城市时区，如中国时间 UTC+8）。
 /// 返回 `None` 表示未识别出时间。
 pub fn parse(text: &str) -> Option<Parsed> {
@@ -536,6 +748,11 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
     let now = now_sec();
     let tz_secs = tz_offset_min * 60;
     let day_start = now - (now + tz_secs).rem_euclid(86_400);
+    let recur_match = find_recurrence(raw);
+    let recur_rule = recur_match
+        .as_ref()
+        .map(|r| r.rule.clone())
+        .unwrap_or_default();
 
     // ---------- 1) 相对时间（30分钟后 / 半小时后 / 2小时后 / 一个半小时后 / 一刻钟后） ----------
     if let Some(pos) = raw.find("一刻钟后").or_else(|| raw.find("一刻钟之后")) {
@@ -551,6 +768,7 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
             title,
             matched,
             tz_offset_min,
+            recur_rule,
         });
     }
 
@@ -583,6 +801,7 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
                             title,
                             matched,
                             tz_offset_min,
+                            recur_rule,
                         });
                     }
                 }
@@ -616,15 +835,39 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
                     title,
                     matched,
                     tz_offset_min,
+                    recur_rule,
                 });
             }
         }
     }
 
-    let date_match = find_date(raw, day_start, tz_secs);
+    let mut date_match = find_date(raw, day_start, tz_secs);
+    // 若识别出「每月X号」，用该月日期覆盖 date_match
+    if let Some(ref rm) = recur_match {
+        if let Some(mday) = rm.month_day {
+            let (cur_y, cur_m, _, _, _, _) = tz::epoch_to_civil(day_start + tz_secs);
+            if let Some(mut target_utc) = tz::civil_to_epoch_secs(cur_y, cur_m, mday.min(28), 0, 0, 0) {
+                let mut off = (target_utc - tz_secs - day_start).div_euclid(86_400);
+                if off < 0 {
+                    let (ny, nm) = if cur_m >= 12 { (cur_y + 1, 1) } else { (cur_y, cur_m + 1) };
+                    if let Some(next_utc) = tz::civil_to_epoch_secs(ny, nm, mday.min(28), 0, 0, 0) {
+                        target_utc = next_utc;
+                        off = (target_utc - tz_secs - day_start).div_euclid(86_400);
+                    }
+                }
+                date_match = Some(DateMatch {
+                    day_offset: off,
+                    start: rm.start,
+                    end: rm.end,
+                    is_same_weekday_candidate: off == 0,
+                    implied_period: None,
+                });
+            }
+        }
+    }
     let period_match = find_period(raw);
 
-    // ---------- 2) 有明确时刻（如「明天下午3点」「15:30」「今晚8点」「明早8点半」） ----------
+    // ---------- 2) 有明确时刻（如「明天下午3点」「15:30」「今晚8点」「明早8点半」「每天14:10」） ----------
     if let Some((h, minute, hs, he)) = find_hour(raw) {
         let mut hh = h;
         let effective_period = period_match
@@ -670,8 +913,17 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
         if fire_at <= now {
             fire_at += 86_400;
         }
+        // 若是「每个工作日」且落在了周末，推进到下一个工作日
+        if recur_rule == "workdays" {
+            while matches!(weekday_in_tz(fire_at, tz_offset_min), 0 | 6) {
+                fire_at += 86_400;
+            }
+        }
 
         let mut spans: Vec<(usize, usize)> = Vec::new();
+        if let Some(ref rm) = recur_match {
+            spans.push((rm.start, rm.end));
+        }
         if let Some(dm) = date_match {
             spans.push((dm.start, dm.end));
         }
@@ -687,10 +939,11 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
             title,
             matched,
             tz_offset_min,
+            recur_rule,
         });
     }
 
-    // ---------- 3) 有时间段词、无具体几点（如「明天早晨」「明天中午」「今天下午」「今晚」「明早」） ----------
+    // ---------- 3) 有时间段词、无具体几点（如「明天早晨」「明天中午」「今天下午」「今晚」「明早」「每天早上」） ----------
     if let Some(pm) = period_match {
         let mut day_offset = date_match.map(|d| d.day_offset).unwrap_or(0);
         if let Some(dm) = date_match {
@@ -703,8 +956,16 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
         if fire_at <= now {
             fire_at += 86_400;
         }
+        if recur_rule == "workdays" {
+            while matches!(weekday_in_tz(fire_at, tz_offset_min), 0 | 6) {
+                fire_at += 86_400;
+            }
+        }
 
         let mut spans: Vec<(usize, usize)> = Vec::new();
+        if let Some(ref rm) = recur_match {
+            spans.push((rm.start, rm.end));
+        }
         if let Some(dm) = date_match {
             spans.push((dm.start, dm.end));
         }
@@ -717,10 +978,11 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
             title,
             matched,
             tz_offset_min,
+            recur_rule,
         });
     }
 
-    // ---------- 4) 只有日期或合音词（如「明早」「今晚」「明天」「后天去深圳出差」「周五把材料发出去」） ----------
+    // ---------- 4) 只有日期或合音词（如「明早」「今晚」「明天」「后天去深圳出差」「周五把材料发出去」「本周内完成」） ----------
     if let Some(dm) = date_match {
         let (dh, dmin) = dm
             .implied_period
@@ -735,13 +997,40 @@ pub fn parse_in_tz(text: &str, tz_offset_min: i64) -> Option<Parsed> {
         if fire_at <= now {
             fire_at += 86_400;
         }
-        let spans = [(dm.start, dm.end)];
+        let mut spans = vec![(dm.start, dm.end)];
+        if let Some(ref rm) = recur_match {
+            spans.push((rm.start, rm.end));
+        }
+        let matched = build_matched_text(raw, &spans);
         let title = extract_title_spans(raw, &spans);
         return Some(Parsed {
             fire_at,
             title,
-            matched: raw[dm.start..dm.end].trim().to_string(),
+            matched,
             tz_offset_min,
+            recur_rule,
+        });
+    }
+
+    // ---------- 5) 只有周期词（如「每天京东签到」「每个工作日写日报」） ----------
+    if let Some(rm) = recur_match {
+        let mut fire_at = day_start + 10 * 3600;
+        if fire_at <= now {
+            fire_at += 86_400;
+        }
+        if rm.rule == "workdays" {
+            while matches!(weekday_in_tz(fire_at, tz_offset_min), 0 | 6) {
+                fire_at += 86_400;
+            }
+        }
+        let spans = [(rm.start, rm.end)];
+        let title = extract_title_spans(raw, &spans);
+        return Some(Parsed {
+            fire_at,
+            title,
+            matched: raw[rm.start..rm.end].trim().to_string(),
+            tz_offset_min,
+            recur_rule: rm.rule,
         });
     }
 
@@ -851,6 +1140,347 @@ fn extract_title_spans(raw: &str, spans: &[(usize, usize)]) -> String {
     } else {
         t.to_string()
     }
+}
+
+/* ==================== 多条目工作计划 / 编号清单结构化解析 ==================== */
+
+/// 针对「周工作安排 / 编号任务清单」的结构化预分析结果。
+/// 既用于规则兜底下的多条目拆解，也用于约束与校正大模型的拆解输出（防止漏拆、误把作者当协作对象、误吞专有名词、或把周计划排到周末）。
+#[derive(Debug, Clone, Default)]
+pub struct WorkPlanAnalysis {
+    /// 是否包含 2 条及以上的编号/列表子项
+    pub is_multi_list: bool,
+    /// 是否属于「本周工作安排 / 周计划」类跨工作日清单
+    pub is_weekly_plan: bool,
+    /// 标题行里的基准日期零点（UTC 秒，已对齐当前时区自然日零点）
+    pub header_date_day_start: Option<i64>,
+    /// 标题行识别出的日期原文（如 `"2026.10.26"`）
+    pub header_date_matched: String,
+    /// 标题行识别出的计划归属人/作者本人（如 `"杨帆"`），不能当作任务的外部协作对象 `who`
+    pub header_author: String,
+    /// 标题行识别出的常驻城市（如 `"北京"`），不能当作异地出差日程
+    pub header_city: String,
+    /// 拆解出的各条原始子项文本（已剥离 `1、` / `2.` 等序号前缀）
+    pub raw_items: Vec<String>,
+}
+
+/// 判断字节位置 `pos` 是否可作为编号条目（如 `1、`、`2.`）的合法起始边界
+fn is_item_marker_boundary(text: &str, pos: usize) -> bool {
+    if pos == 0 {
+        return true;
+    }
+    if let Some(prev) = text[..pos].chars().next_back() {
+        prev.is_whitespace() || "；;。！!？?：:\n\r".contains(prev)
+    } else {
+        true
+    }
+}
+
+/// 在文本中扫描从 `1` 开始递增的编号条目（支持 `1、`、`1.`、`1）`、`(1)`、`（1）`），
+/// 返回 `(标题头文本, 各编号条目正文列表)`。
+/// 特别注意：`pe-core 2.0` 中的 `2.0` 因小数点后紧跟数字 `0` 且无递增上下文，绝不会被误判为序号 `2.`。
+fn split_numbered_items(text: &str) -> Option<(String, Vec<String>)> {
+    let mut markers: Vec<(usize, usize, u32)> = Vec::new();
+    let mut expected: u32 = 1;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let n = chars.len();
+    let mut idx = 0usize;
+
+    while idx < n {
+        let (byte_pos, ch) = chars[idx];
+        if is_item_marker_boundary(text, byte_pos) {
+            // 形态 A：数字 + `、` / `.` / `）` / `)`
+            if ch.is_ascii_digit() {
+                let mut d_end_idx = idx;
+                while d_end_idx < n && chars[d_end_idx].1.is_ascii_digit() && (d_end_idx - idx) < 2 {
+                    d_end_idx += 1;
+                }
+                if d_end_idx < n {
+                    let num_end_byte = chars[d_end_idx].0;
+                    if let Ok(num) = text[byte_pos..num_end_byte].parse::<u32>() {
+                        let sep_ch = chars[d_end_idx].1;
+                        let after_sep_idx = d_end_idx + 1;
+                        let is_valid_sep = match sep_ch {
+                            '、' | '）' => true,
+                            '.' | ')' => {
+                                // '.' 后不能紧跟数字（排除 2.0 / 3.14 等版本号或小数）
+                                after_sep_idx < n && !chars[after_sep_idx].1.is_ascii_digit()
+                            }
+                            _ => false,
+                        };
+                        if is_valid_sep && num == expected {
+                            let content_start = if after_sep_idx < n {
+                                chars[after_sep_idx].0
+                            } else {
+                                text.len()
+                            };
+                            markers.push((byte_pos, content_start, num));
+                            expected += 1;
+                            idx = after_sep_idx;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // 形态 B：`①`..`⑩` 圆圈数字
+            if ('\u{2460}'..='\u{2469}').contains(&ch) {
+                let num = (ch as u32) - ('\u{2460}' as u32) + 1;
+                if num == expected {
+                    let content_start = byte_pos + ch.len_utf8();
+                    markers.push((byte_pos, content_start, num));
+                    expected += 1;
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    if markers.len() < 2 {
+        return None;
+    }
+
+    let header = text[..markers[0].0].trim().to_string();
+    let mut items = Vec::with_capacity(markers.len());
+    for i in 0..markers.len() {
+        let start = markers[i].1;
+        let end = if i + 1 < markers.len() {
+            markers[i + 1].0
+        } else {
+            text.len()
+        };
+        let piece = text[start..end]
+            .trim()
+            .trim_end_matches(|c: char| "；;。".contains(c))
+            .trim();
+        if !piece.is_empty() {
+            items.push(piece.to_string());
+        }
+    }
+
+    if items.len() >= 2 {
+        Some((header, items))
+    } else {
+        None
+    }
+}
+
+/// 解析计划标题行（如 `"2026.10.26 本周工作安排 - 杨帆（北京）"`）中的作者与常驻地
+fn parse_header_author_and_city(header: &str) -> (String, String) {
+    let h = header.trim();
+    if h.is_empty() {
+        return (String::new(), String::new());
+    }
+    // 定位分隔符 `-` / `—` / `｜` / `|`
+    let tail = h
+        .rsplit_once(" - ")
+        .or_else(|| h.rsplit_once('-'))
+        .or_else(|| h.rsplit_once('—'))
+        .or_else(|| h.rsplit_once('｜'))
+        .or_else(|| h.rsplit_once('|'))
+        .map(|(_, right)| right.trim())
+        .unwrap_or("");
+    if tail.is_empty() || tail.chars().all(|c| c.is_ascii_digit()) {
+        return (String::new(), String::new());
+    }
+
+    // 拆分「杨帆（北京）」或「杨帆(北京)」
+    if let Some((name_part, rest)) = tail.split_once('（').or_else(|| tail.split_once('(')) {
+        let city = rest
+            .trim_end_matches(|c: char| c == '）' || c == ')' || c.is_whitespace())
+            .trim()
+            .to_string();
+        let author = name_part.trim().to_string();
+        return (author, city);
+    }
+
+    (tail.to_string(), String::new())
+}
+
+/// 对输入文本做结构化工作计划/多条目分析
+pub fn analyze_work_plan(text: &str, tz_offset_min: i64) -> WorkPlanAnalysis {
+    let raw = text.trim();
+    if raw.is_empty() {
+        return WorkPlanAnalysis::default();
+    }
+    let now = now_sec();
+    let tz_secs = tz_offset_min * 60;
+    let day_start = now - (now + tz_secs).rem_euclid(86_400);
+
+    let mut out = WorkPlanAnalysis::default();
+
+    if let Some((header, items)) = split_numbered_items(raw) {
+        out.is_multi_list = true;
+        out.raw_items = items;
+        let check_scope = if header.is_empty() { raw } else { &header };
+        out.is_weekly_plan = check_scope.contains("本周")
+            || check_scope.contains("这周")
+            || check_scope.contains("下周")
+            || check_scope.contains("周工作")
+            || check_scope.contains("周计划")
+            || check_scope.contains("周安排")
+            || check_scope.contains("周报");
+        if !header.is_empty() {
+            if let Some(dm) = find_date(&header, day_start, tz_secs) {
+                out.header_date_day_start = Some(day_start + dm.day_offset * 86_400);
+                out.header_date_matched = header[dm.start..dm.end].trim().to_string();
+            }
+            let (author, city) = parse_header_author_and_city(&header);
+            out.header_author = author;
+            out.header_city = city;
+        }
+        return out;
+    }
+
+    // 兼容无数字序号但按行罗列（如 `- xxx` / `• xxx`）的多行清单
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() >= 2 {
+        let bullet_items: Vec<String> = lines
+            .iter()
+            .filter_map(|l| {
+                l.strip_prefix("- ")
+                    .or_else(|| l.strip_prefix("* "))
+                    .or_else(|| l.strip_prefix("• "))
+                    .or_else(|| l.strip_prefix("· "))
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        if bullet_items.len() >= 2 {
+            out.is_multi_list = true;
+            out.raw_items = bullet_items;
+            if !lines[0].starts_with(['-', '*', '•', '·']) {
+                let header = lines[0];
+                out.is_weekly_plan = header.contains("本周")
+                    || header.contains("周工作")
+                    || header.contains("周计划")
+                    || header.contains("周安排");
+                if let Some(dm) = find_date(header, day_start, tz_secs) {
+                    out.header_date_day_start = Some(day_start + dm.day_offset * 86_400);
+                    out.header_date_matched = header[dm.start..dm.end].trim().to_string();
+                }
+                let (author, city) = parse_header_author_and_city(header);
+                out.header_author = author;
+                out.header_city = city;
+            }
+        }
+    }
+
+    out
+}
+
+/// 润色单条任务标题：消除「开始设计…中的产品结构设计」这类首尾动词重复，同时完整保留英文/模型名/版本号。
+pub fn clean_plan_item_title(raw_item: &str) -> String {
+    let mut s = raw_item
+        .trim()
+        .trim_matches(|c: char| c.is_whitespace() || "；;。，,、".contains(c))
+        .to_string();
+
+    // 「开始设计pe-core 2.0 版本中的产品结构设计」→「pe-core 2.0 版本产品结构设计」
+    for prefix in ["开始设计", "着手设计", "准备设计"] {
+        if s.starts_with(prefix) && s.ends_with("设计") && s.chars().count() > prefix.chars().count() + 2 {
+            s = s[prefix.len()..].trim().to_string();
+            s = s.replace("版本中的", "版本");
+            break;
+        }
+    }
+    for prefix in ["开始进行", "着手进行", "准备进行"] {
+        if s.starts_with(prefix) && s.chars().count() > prefix.chars().count() + 2 {
+            s = s[prefix.len()..].trim().to_string();
+            break;
+        }
+    }
+    // 「市场数据服务实时计算部分，架构优化和功能迭代」→「市场数据服务实时计算架构优化与功能迭代」
+    if s.contains("部分，") {
+        s = s.replace("部分，", " ");
+    }
+    s
+}
+
+/// 根据任务文本语义推断默认优先级（1=高 2=中 3=低）
+pub fn infer_item_priority(title: &str) -> i64 {
+    let lower = title.to_ascii_lowercase();
+    const HIGH_CUES: &[&str] = &[
+        "环境问题",
+        "故障",
+        "紧急",
+        "阻塞",
+        "报错",
+        "修复",
+        "生产问题",
+        "线上问题",
+        "立刻",
+        "马上",
+        "今天必须",
+        "bug",
+        "hotfix",
+    ];
+    if HIGH_CUES.iter().any(|k| title.contains(k) || lower.contains(k)) {
+        1
+    } else {
+        2
+    }
+}
+
+/// 计算某个时间戳在指定时区（分钟偏移）下是周几（0=周日, 1=周一, ..., 5=周五, 6=周六）
+pub fn weekday_in_tz(ts: i64, tz_offset_min: i64) -> i64 {
+    let tz_secs = tz_offset_min * 60;
+    ((ts + tz_secs).div_euclid(86_400) + 4).rem_euclid(7)
+}
+
+/// 为周计划 / 多条目任务分配合理的工作日提醒时刻：
+///   - 从 `anchor_day_start`（如周一 `2026-10-26 00:00`）起，第 `item_idx` 条任务分配到第 `item_idx % 5` 个工作日（周一至周五），绝不排进周六/周日；
+///   - 前 5 条默认放在对应工作日 `10:00`，第 6 条起放在对应工作日 `14:30`；
+///   - 若落在「今天」且当前时刻已过 `10:00`，则自动顺延到今天接下来的工作时段（`14:00` / `16:00` / `18:00` / `now + 1h`），避免刚添加就显示「已到点」。
+pub fn workday_slot_ts(
+    anchor_day_start: i64,
+    item_idx: usize,
+    now: i64,
+    tz_offset_min: i64,
+) -> i64 {
+    let tz_secs = tz_offset_min * 60;
+    let today_day_start = now - (now + tz_secs).rem_euclid(86_400);
+    // 若基准日早于今天（比如周二录入写着周一日期的周计划），从今天开始排，避免排到过去的日子
+    let mut cur_day = anchor_day_start.max(today_day_start);
+
+    // 若起始日恰好是周六/周日，先跳到下一个周一
+    while matches!(weekday_in_tz(cur_day, tz_offset_min), 0 | 6) {
+        cur_day += 86_400;
+    }
+
+    let target_workdays = item_idx % 5;
+    let mut stepped = 0usize;
+    while stepped < target_workdays {
+        cur_day += 86_400;
+        if !matches!(weekday_in_tz(cur_day, tz_offset_min), 0 | 6) {
+            stepped += 1;
+        }
+    }
+
+    let base_offset = if item_idx < 5 {
+        10 * 3600
+    } else {
+        14 * 3600 + 30 * 60
+    };
+    let mut fire_at = cur_day + base_offset;
+
+    if cur_day == today_day_start && fire_at <= now + 300 {
+        let sod = (now + tz_secs).rem_euclid(86_400);
+        fire_at = if sod < 13 * 3600 + 50 * 60 {
+            today_day_start + 14 * 3600
+        } else if sod < 15 * 3600 + 50 * 60 {
+            today_day_start + 16 * 3600
+        } else if sod < 17 * 3600 + 50 * 60 {
+            today_day_start + 18 * 3600
+        } else {
+            now + 3600
+        };
+    }
+
+    fire_at
 }
 
 #[cfg(test)]
@@ -1004,5 +1634,72 @@ mod tests {
         assert!(p.fire_at > now_sec());
         let idx = ((p.fire_at + tz::offset_secs()).div_euclid(86_400) + 4).rem_euclid(7);
         assert_eq!(idx, 5, "必须落在周五");
+    }
+
+    #[test]
+    fn weekly_work_plan_numbered_list_analysis() {
+        let text = "2026.10.26 本周工作安排 - 杨帆（北京）\n\
+1、git迁移后环境问题解决和解答\n\
+2、GPU计算适配改造\n\
+3、跟进Local Vol、Heston Model、SLV Model的问题解答\n\
+4、开始设计pe-core 2.0 版本中的产品结构设计\n\
+5、市场数据服务实时计算部分，架构优化和功能迭代";
+
+        let plan = analyze_work_plan(text, 480);
+        assert!(plan.is_multi_list, "应识别为多条目清单");
+        assert!(plan.is_weekly_plan, "应识别为本周工作安排");
+        assert_eq!(plan.header_date_matched, "2026.10.26");
+        assert_eq!(plan.header_author, "杨帆");
+        assert_eq!(plan.header_city, "北京");
+        assert_eq!(plan.raw_items.len(), 5, "必须精准拆出 5 条且 pe-core 2.0 不误切");
+        assert_eq!(
+            clean_plan_item_title(&plan.raw_items[2]),
+            "跟进Local Vol、Heston Model、SLV Model的问题解答"
+        );
+        assert_eq!(
+            clean_plan_item_title(&plan.raw_items[3]),
+            "pe-core 2.0 版本产品结构设计"
+        );
+        assert_eq!(infer_item_priority(&plan.raw_items[0]), 1, "环境问题应判为高优");
+        assert_eq!(infer_item_priority(&plan.raw_items[1]), 2, "常规研发应判为中优");
+
+        let anchor = plan.header_date_day_start.unwrap();
+        for idx in 0..5 {
+            let ts = workday_slot_ts(anchor, idx, anchor, 480);
+            let wd = weekday_in_tz(ts, 480);
+            assert!(
+                (1..=5).contains(&wd),
+                "第 {} 条任务的排期必须落在周一至周五，实际 wd={}",
+                idx + 1,
+                wd
+            );
+        }
+    }
+
+    #[test]
+    fn within_this_week_resolves_to_friday() {
+        let p = parse_in_tz("跟进三个模型问题，本周内完成", 480).unwrap();
+        let wd = weekday_in_tz(p.fire_at, 480);
+        assert_eq!(wd, 5, "本周内完成必须落在周五(5)，实际 wd={wd}");
+        assert!(p.title.contains("跟进三个模型问题"), "title={}", p.title);
+    }
+
+    #[test]
+    fn recurring_todo_parsing() {
+        let p_daily = parse_in_tz("每天14:10 京东签到", 480).unwrap();
+        assert_eq!(p_daily.recur_rule, "daily");
+        assert_eq!(p_daily.title, "京东签到");
+        assert_eq!(hm(p_daily.fire_at), (14, 10));
+
+        let p_workday = parse_in_tz("每个工作日早上9点半 晨会", 480).unwrap();
+        assert_eq!(p_workday.recur_rule, "workdays");
+        assert_eq!(p_workday.title, "晨会");
+        let wd = weekday_in_tz(p_workday.fire_at, 480);
+        assert!((1..=5).contains(&wd));
+
+        let p_weekly = parse_in_tz("每周五下午4点 写周报", 480).unwrap();
+        assert_eq!(p_weekly.recur_rule, "weekly");
+        assert_eq!(p_weekly.title, "写周报");
+        assert_eq!(weekday_in_tz(p_weekly.fire_at, 480), 5);
     }
 }

@@ -2,7 +2,7 @@
  * WorkMate · 面板逻辑
  * 编制：WorkMate Contributors
  *
- * P0 阶段只做数据层自检：读 stats、触发模拟数据、跑一次聚合、展示分布。
+ * 面板负责读取统计、展示趋势，并提供少量维护操作。
  * 真实数据在 P2 由感知模块（M5）写入。
  */
 
@@ -73,6 +73,7 @@ interface Reminder {
   note: string;
   location?: string;
   tz_offset_min?: number;
+  recur_rule?: string;
 }
 
 interface TzInfo {
@@ -179,28 +180,17 @@ function applyTzInfo(tz: TzInfo | undefined): void {
 }
 
 function renderTzBanner(): void {
-  const el = document.getElementById("rm-tz-text");
   const nowSec = Math.floor(Date.now() / 1000);
   const cityHm = bjHM(nowSec, activeTz.offset_min);
-  const machHm = bjHM(nowSec, activeTz.machine_offset_min);
-  if (el) {
-    if (activeTz.machine_mismatch) {
-      el.innerHTML = `🌏 计时基准：<b>${escapeHtml(activeTz.city_label)} (${escapeHtml(activeTz.utc_label)}) ${cityHm}</b> · <span class="tz-warn">本机系统 ${escapeHtml(activeTz.machine_utc_label)} (${machHm}) 已自动校准</span>`;
-    } else {
-      el.innerHTML = `🌏 计时基准：<b>${escapeHtml(activeTz.city_label)} (${escapeHtml(activeTz.utc_label)}) ${cityHm}</b>（跟随所在城市自动识别与转换）`;
-    }
-  }
-  const locTzEl = document.getElementById("loc-tz");
-  if (locTzEl) {
-    locTzEl.textContent = `${activeTz.city_label}（${activeTz.utc_label} · 当前 ${cityHm}）${
-      activeTz.machine_mismatch ? ` ｜ 本机系统 ${activeTz.machine_utc_label} (${machHm})` : ""
-    }`;
-  }
+  const titleClock = document.getElementById("title-clock");
+  if (titleClock) titleClock.textContent = `当前 ${cityHm}（${activeTz.city_label} ${activeTz.utc_label}）`;
   const rmTime = document.getElementById("rm-time") as HTMLInputElement | null;
   if (rmTime) {
     rmTime.title = `按 ${activeTz.city_label} (${activeTz.utc_label}) 选择提醒时刻`;
   }
 }
+
+window.setInterval(renderTzBanner, 30_000);
 
 async function syncTzStatus(): Promise<void> {
   const tz = await invokeCmd<TzInfo>("tz_status");
@@ -221,6 +211,12 @@ function bjHM(tsSec: number, offsetMin = activeTz.offset_min): string {
 function bjMDHM(tsSec: number, offsetMin = activeTz.offset_min): string {
   const d = bjDate(tsSec, offsetMin);
   return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${bjHM(tsSec, offsetMin)}`;
+}
+
+/** 时间戳 → 指定时区下的周几短名（如 "周一".."周日"） */
+function bjWeekday(tsSec: number, offsetMin = activeTz.offset_min): string {
+  const d = bjDate(tsSec, offsetMin);
+  return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][d.getUTCDay()] ?? "";
 }
 
 /** datetime-local 字符串按**当前生效城市时区**解释 → 秒级时间戳 */
@@ -320,8 +316,24 @@ function renderBars(rows: CategoryRow[], eventsToday = 0): void {
   // 七条一样长，完全看不出差异（截图里被抓到）。
   const total = rows.reduce((a, r) => a + r.focus_sec, 0);
   $("bars-total").textContent = total ? `合计 ${fmtDur(total)}` : "";
-  box.innerHTML = rows
+  const coding = rows.filter((r) => r.app_cat === 0 || r.app_cat === 7);
+  const displayRows = coding.length > 1
+    ? [...rows.filter((r) => r.app_cat !== 0 && r.app_cat !== 7), { app_cat: -1, cnt: 0, focus_sec: coding.reduce((s, r) => s + r.focus_sec, 0) }]
+    : rows;
+  box.innerHTML = displayRows
+    .sort((a, b) => b.focus_sec - a.focus_sec)
     .map((r, i) => {
+      if (r.app_cat === -1) {
+        const codingSec = r.focus_sec;
+        const ide = coding.find((x) => x.app_cat === 0)?.focus_sec ?? 0;
+        const agent = coding.find((x) => x.app_cat === 7)?.focus_sec ?? 0;
+        const share = total ? codingSec / total * 100 : 0;
+        const idePct = codingSec ? ide / codingSec * 100 : 0;
+        return `<div class="bar-item">
+          <div class="bar-head"><span>编码 <small class="bar-sub">传统 IDE ${fmtDur(ide)} · AI Agent ${fmtDur(agent)}</small></span><span>${fmtDur(codingSec)} · ${share.toFixed(0)}%</span></div>
+          <div class="bar-track coding-track"><div class="bar-fill" style="width:${share.toFixed(1)}%;background:linear-gradient(90deg,#5B5CE2 0 ${idePct.toFixed(1)}%,#8B5CF6 ${idePct.toFixed(1)}% 100%)"></div></div>
+        </div>`;
+      }
       const label = CAT_LABEL[r.app_cat] ?? `类别 ${r.app_cat}`;
       const share = total ? (r.focus_sec / total) * 100 : 0;
       // 排名越靠后越浅，既能区分又不至于七彩
@@ -425,8 +437,6 @@ interface TodaySummary {
   categories: CategoryRow[];
   rm_pending: number;
   rm_done: number;
-  water_count: number;
-  standup_count: number;
   sit_streak_min: number;
   events: number;
 }
@@ -676,8 +686,6 @@ async function refreshToday(): Promise<void> {
   $("td-focus").textContent = String(t.focus_min);
   $("td-pending").textContent = String(t.rm_pending);
   $("td-done").textContent = String(t.rm_done);
-  $("td-water").textContent = String(t.water_count);
-  $("td-stand").textContent = String(t.standup_count);
 
   await refreshFocusStatus();
 
@@ -688,11 +696,14 @@ async function refreshToday(): Promise<void> {
         ? '<span class="chip">今天只有闲置时段</span>'
         : '<span class="chip">今天还没有感知数据</span>';
   } else {
-    box.innerHTML = t.categories
-      .map(
-        (r) =>
-          `<span class="chip">${escapeHtml(CAT_LABEL[r.app_cat] ?? `类别${r.app_cat}`)} <b>${fmtDur(r.focus_sec)}</b></span>`,
-      )
+    const ide = t.categories.find((r) => r.app_cat === 0)?.focus_sec ?? 0;
+    const agent = t.categories.find((r) => r.app_cat === 7)?.focus_sec ?? 0;
+    const codingChip = ide || agent
+      ? `<span class="chip"><i class="tl-dot" style="display:inline-block;background:#5B5CE2"></i>编码 <b>${fmtDur(ide + agent)}</b><small class="bar-sub">IDE ${fmtDur(ide)} · Agent ${fmtDur(agent)}</small></span>`
+      : "";
+    box.innerHTML = codingChip + t.categories
+      .filter((r) => r.app_cat !== 0 && r.app_cat !== 7)
+      .map((r) => `<span class="chip">${escapeHtml(CAT_LABEL[r.app_cat] ?? `类别${r.app_cat}`)} <b>${fmtDur(r.focus_sec)}</b></span>`)
       .join("");
   }
 
@@ -700,7 +711,7 @@ async function refreshToday(): Promise<void> {
   const d = await invokeCmd<{ beijing_hm: string; quiet: boolean; budget_ok: boolean; tz?: TzInfo }>("notify_status");
   if (d) {
     if (d.tz) applyTzInfo(d.tz);
-    const parts = [`当前 ${d.beijing_hm}（${activeTz.city_label} ${activeTz.utc_label}）`];
+    const parts: string[] = [];
     parts.push(d.quiet ? "静默时段：只放硬提醒" : "可提醒");
     parts.push(d.budget_ok ? "打扰预算充足" : "刚提醒过，软提醒会顺延");
     if (t.sit_streak_min > 0) parts.push(`连续专注 ${t.sit_streak_min} 分钟`);
@@ -786,6 +797,27 @@ function fmtRemain(fireAt: number): string {
   return bjMDHM(fireAt);
 }
 
+function fmtDurationMin(min: number): string {
+  if (min <= 0) return "";
+  if (min < 60) return `${min} 分钟`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h} 小时 ${m} 分` : `${h} 小时`;
+}
+
+function fmtRecurLabel(rule?: string): string {
+  const r = (rule || "").trim();
+  if (!r) return "";
+  if (r === "daily") return "每天";
+  if (r === "workdays") return "工作日";
+  if (r === "weekly") return "每周";
+  if (r === "monthly") return "每月";
+  if (r.startsWith("every:") && r.endsWith("d")) {
+    return `每 ${r.slice(6, -1)} 天`;
+  }
+  return "定期";
+}
+
 async function refreshReminders(): Promise<void> {
   const list = (await invokeCmd<Reminder[]>("list_reminders")) ?? [];
   const box = $("rm-list");
@@ -797,14 +829,27 @@ async function refreshReminders(): Promise<void> {
     .map((r) => {
       const cls = r.status === 2 ? "done" : r.status === 1 ? "fired" : "";
       const hh = bjMDHM(r.fire_at);
+      const wd = bjWeekday(r.fire_at);
       const status = r.status === 2 ? "已完成" : r.status === 1 ? "已提醒" : fmtRemain(r.fire_at);
       const tzSub = crossTzMeta(r.fire_at, r.tz_offset_min);
+      const priBadge =
+        r.priority === 1
+          ? '<span class="rm-pri hi">高优</span>'
+          : r.priority === 3
+            ? '<span class="rm-pri lo">低</span>'
+            : "";
+      const recurText = fmtRecurLabel(r.recur_rule);
+      const recurBadge = recurText ? `<span class="rm-recur">🔁 ${escapeHtml(recurText)}</span>` : "";
+      const durText = r.duration_min > 0 && r.duration_min <= 480 ? ` · 约 ${fmtDurationMin(r.duration_min)}` : "";
+      const noteRow =
+        r.note && r.note.trim()
+          ? `<div class="rm-note">${escapeHtml(r.note.trim())}</div>`
+          : "";
       return `<div class="rm-item ${cls}" data-id="${r.id}">
         <div class="rm-main">
-          <div class="rm-title">${escapeHtml(r.title)}</div>
-          <div class="rm-meta">${hh} (${escapeHtml(activeTz.utc_label)}) · ${status}${tzSub}${
-            r.priority === 1 ? ' · <b class="pri-hi">高</b>' : r.priority === 3 ? " · 低" : ""
-          }${r.duration_min > 0 ? ` · ${r.duration_min} 分钟` : ""}</div>
+          <div class="rm-title">${priBadge}${recurBadge}${escapeHtml(r.title)}</div>
+          ${noteRow}
+          <div class="rm-meta"><span>${hh} ${wd} (${escapeHtml(activeTz.utc_label)}) · ${status}${tzSub}${durText}</span></div>
         </div>
         ${r.status !== 2 ? `<button class="rm-act" data-act="done">完成</button>` : ""}
         <button class="rm-act" data-act="del">删</button>
@@ -824,14 +869,20 @@ interface ParsedTodo {
   fire_at: number;
   title: string;
   matched: string;
+  is_multi_list?: boolean;
+  is_weekly_plan?: boolean;
+  multi_count?: number;
+  preview_titles?: string[];
   tz_offset_min?: number;
   city_mdhm?: string;
   machine_mdhm?: string;
   cross_hint?: string;
   tz?: TzInfo;
+  recur_rule?: string;
+  recur_label?: string;
 }
 
-/** 自然语言预览：输入「明天早晨9点提醒我发周报」「明天中午对齐需求」时实时告诉用户会定在什么时候 */
+/** 自然语言预览：输入「明天早晨9点提醒我发周报」「明天中午对齐需求」或粘贴多条周工作计划时实时提示 */
 let parseTimer: number | undefined;
 function schedulePreview(): void {
   clearTimeout(parseTimer);
@@ -840,17 +891,22 @@ function schedulePreview(): void {
     const hint = $("rm-parse");
     const text = input.value.trim();
     if (!text) {
-      hint.textContent = `支持按 ${activeTz.city_label} (${activeTz.utc_label}) 识别「明天早晨」「明天中午」「今晚8点」「30分钟后」`;
+      hint.textContent = `支持按 ${activeTz.city_label} (${activeTz.utc_label}) 识别「明天早晨」「每天14点」「每周五」或粘贴「1、… 2、…」周工作计划`;
       return;
     }
     const p = await invokeCmd<ParsedTodo>("parse_todo", { text });
     if (p?.tz) applyTzInfo(p.tz);
-    if (p?.ok) {
+    if (p?.ok && p.is_multi_list && (p.multi_count ?? 0) >= 2) {
+      const planLabel = p.is_weekly_plan ? "周工作计划" : "多条任务清单";
+      const sample = (p.preview_titles ?? []).slice(0, 3).join(" / ");
+      hint.textContent = `已识别${planLabel}（共 ${p.multi_count} 项 · 基准 ${p.matched}）→ 点击「添加」将自动拆解并按工作日排期（${sample}…）`;
+    } else if (p?.ok) {
       const cityTime = p.city_mdhm || bjMDHM(p.fire_at);
       const machPart = activeTz.machine_mismatch
         ? `（折合本机 ${activeTz.machine_utc_label} ${p.machine_mdhm || bjMDHM(p.fire_at, activeTz.machine_offset_min)}）`
         : "";
-      hint.textContent = `已识别「${p.matched}」→ ${activeTz.city_label} (${activeTz.utc_label}) ${cityTime}${machPart} · ${p.title}`;
+      const recurPart = p.recur_label ? ` · 🔁 ${p.recur_label}` : "";
+      hint.textContent = `已识别「${p.matched}」→ ${activeTz.city_label} (${activeTz.utc_label}) ${cityTime}${machPart}${recurPart} · ${p.title}`;
     } else {
       hint.textContent = `未识别时间；不选时间则默认 30 分钟后（按 ${activeTz.utc_label} 簿记）提醒`;
     }
@@ -868,10 +924,16 @@ async function addReminder(minutes: number | null): Promise<void> {
 
   const timeEl = $("rm-time") as HTMLInputElement;
   const timeInput = timeEl.value;
+  const recurEl = document.getElementById("rm-recur") as HTMLSelectElement | null;
+  const recurRule = recurEl?.value || "";
 
   // 用户显式选了时间（快捷按钮 / 日期控件）→ 尊重显式选择；
   // 否则先做自然语言解析，解析不出再按 30 分钟兜底。
   if (minutes === null && !timeInput) {
+    const recurPrefix =
+      recurRule && !/(每天|每日|每工作日|每个工作日|每周|每月|每\d+天)/.test(title)
+        ? `${fmtRecurLabel(recurRule)} `
+        : "";
     const p = await invokeCmd<{
       id: number;
       fire_at: number;
@@ -882,12 +944,23 @@ async function addReminder(minutes: number | null): Promise<void> {
       count: number;
       tz?: TzInfo;
       cross_hint?: string;
-      items: Array<{ id: number; title: string; fire_at: number; kind: string; who_in_note: boolean }>;
+      recur_rule?: string;
+      recur_label?: string;
+      items: Array<{
+        id: number;
+        title: string;
+        fire_at: number;
+        kind: string;
+        priority?: number;
+        who_in_note: boolean;
+        recur_rule?: string;
+      }>;
       workload_line?: string;
-    }>("add_todo", { text: title });
+    }>("add_todo", { text: `${recurPrefix}${title}` });
     if (p) {
       if (p.tz) applyTzInfo(p.tz);
       input.value = "";
+      if (recurEl) recurEl.value = "";
       const src = p.source === "ai" ? "AI 解析" : "规则解析";
       const items = p.items ?? [];
       const wlSuffix = p.workload_line ? ` ｜ ${p.workload_line}` : "";
@@ -895,18 +968,22 @@ async function addReminder(minutes: number | null): Promise<void> {
         ? `（本机 ${activeTz.machine_utc_label} ${bjMDHM(p.fire_at, activeTz.machine_offset_min)}）`
         : "";
       if (items.length > 1) {
-        // 一句话拆成多件时逐条列出：用户要能一眼核对有没有被拆错、时间锚得对不对
-        const lines = items.map((it) => {
-          const tag = it.kind === "event" ? "日程" : "待办";
-          return `${tag}「${it.title}」→ ${bjMDHM(it.fire_at)} (${activeTz.utc_label})`;
-        });
-        $("rm-parse").textContent = `[${src}] 拆成 ${items.length} 条：${lines.join("；")}${wlSuffix}`;
-        toast(`已记下 ${items.length} 条`);
+        // 一句话/一段周计划拆成多件时结构化逐行展示，方便用户一眼核对条目与排期
+        const rowsHtml = items
+          .map((it, i) => {
+            const tag = it.kind === "event" ? "日程" : "待办";
+            const wd = bjWeekday(it.fire_at);
+            return `<div class="rp-row"><span>${i + 1}. [${tag}] ${escapeHtml(it.title)}</span><span class="rp-time">${bjMDHM(it.fire_at)} ${wd} (${escapeHtml(activeTz.utc_label)})</span></div>`;
+          })
+          .join("");
+        $("rm-parse").innerHTML = `<div class="rm-parse-box"><div class="rp-head">[${escapeHtml(src)}] 已拆解为 ${items.length} 条任务${escapeHtml(wlSuffix)}</div>${rowsHtml}</div>`;
+        toast(`已拆解并记下 ${items.length} 条任务`);
       } else {
         const whoTag = p.who_in_note ? "（含对象）" : "";
+        const recurTag = p.recur_label ? ` · 🔁 ${p.recur_label}` : "";
         $("rm-parse").textContent = (p.parsed
-          ? `[${src}] 已记下「${p.title}」→ ${activeTz.city_label} (${activeTz.utc_label}) ${bjMDHM(p.fire_at)}${machPart}${whoTag}`
-          : `[${src}] 未识别时间，已按 30 分钟后记下「${p.title}」→ ${bjMDHM(p.fire_at)} (${activeTz.utc_label})`) + wlSuffix;
+          ? `[${src}] 已记下「${p.title}」→ ${activeTz.city_label} (${activeTz.utc_label}) ${bjMDHM(p.fire_at)} ${bjWeekday(p.fire_at)}${machPart}${whoTag}${recurTag}`
+          : `[${src}] 未识别时间，已按 30 分钟后记下「${p.title}」→ ${bjMDHM(p.fire_at)} (${activeTz.utc_label})${recurTag}`) + wlSuffix;
         toast(`已记下：${p.title}`);
       }
       await refreshReminders();
@@ -922,11 +999,18 @@ async function addReminder(minutes: number | null): Promise<void> {
     fireAt = bjInputToTs(timeInput);
   }
 
-  const id = await invokeCmd<number>("add_reminder", { title, fireAt, level: 1 });
+  const id = await invokeCmd<number>("add_reminder", {
+    title,
+    fireAt,
+    level: 1,
+    recurRule: recurRule || undefined,
+  });
   if (id) {
     input.value = "";
     timeEl.value = "";
-    toast(`已记下：${title}（${activeTz.utc_label} ${bjMDHM(fireAt)}）`);
+    if (recurEl) recurEl.value = "";
+    const rTag = recurRule ? ` · 🔁 ${fmtRecurLabel(recurRule)}` : "";
+    toast(`已记下：${title}（${activeTz.utc_label} ${bjMDHM(fireAt)}${rTag}）`);
     await refreshReminders();
     await refreshToday();
   }
@@ -934,11 +1018,33 @@ async function addReminder(minutes: number | null): Promise<void> {
 
 $("rm-add").addEventListener("click", () => void addReminder(null));
 $("rm-title").addEventListener("input", schedulePreview);
+$("rm-title").addEventListener("paste", (e) => {
+  const ce = e as ClipboardEvent;
+  const pasted = ce.clipboardData?.getData("text/plain") ?? "";
+  if (pasted.includes("\n") || pasted.includes("\r")) {
+    e.preventDefault();
+    const input = $("rm-title") as HTMLInputElement;
+    // 将多行文本中的换行转换为显式分隔符，避免单行 <input> 吞掉换行导致首行与序号行粘连
+    const normalized = pasted
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+      .join(" ； ");
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    input.value = input.value.slice(0, start) + normalized + input.value.slice(end);
+    schedulePreview();
+  }
+});
 $("rm-title").addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Enter") void addReminder(null);
 });
 document.querySelectorAll<HTMLButtonElement>(".quick button").forEach((b) => {
-  b.addEventListener("click", () => void addReminder(Number(b.dataset.min)));
+  if (b.dataset.min) b.addEventListener("click", () => void addReminder(Number(b.dataset.min)));
+});
+document.getElementById("rm-reopen")?.addEventListener("click", async () => {
+  const ok = await invokeCmd<boolean>("alert_reopen");
+  toast(ok ? "已重新打开最近提醒" : "当前没有可恢复的提醒");
 });
 
 $("rm-list").addEventListener("click", async (e) => {
@@ -951,12 +1057,6 @@ $("rm-list").addEventListener("click", async (e) => {
   await refreshReminders();
 });
 
-$("btn-gen").addEventListener("click", async () => {
-  const n = await invokeCmd<number>("simulate_ticks", { count: 48 });
-  if (n !== undefined) toast(`已写入 ${n} 条模拟快照`);
-  await refresh();
-});
-
 $("btn-rollup").addEventListener("click", async () => {
   const n = await invokeCmd<number>("rollup_now");
   if (n !== undefined) toast(`聚合完成，影响 ${n} 个桶`);
@@ -967,7 +1067,7 @@ $("btn-refresh").addEventListener("click", () => {
   void refresh(true);
 });
 
-// 模拟数据/压测数据会污染「今日概览」，给一个明确的归零入口
+// 归零入口仅用于维护本地感知统计
 $("btn-reset").addEventListener("click", async () => {
   if (!confirm("清空所有感知统计（明细 + 聚合桶）？提醒与设置不受影响。")) return;
   const r = await invokeCmd<{ events: number; rollup: number }>("reset_stats");
@@ -1028,6 +1128,9 @@ function showTab(name: string): void {
     void refreshLocation();
     void refreshBrief();
     void refreshNotes();
+  }
+  if (name === "trends") {
+    void refreshBrief();
   }
   // 切到「今日」就补一次聚合，用户不该为了看到数字去点按钮
   if (name === "today") {
@@ -1165,6 +1268,7 @@ interface Risk {
 interface Brief {
   habits: {
     samples: number;
+    workday_only?: boolean;
     avg_start?: string;
     avg_end?: string;
     avg_active_min?: number;
@@ -1187,6 +1291,15 @@ interface Brief {
     avg_response_min?: number | null;
   };
   risks?: Risk[];
+  days?: {
+    day: string;
+    active_min?: number;
+    interrupt_cnt?: number;
+    start?: string;
+    end?: string;
+    place?: string;
+    categories?: { cat_id: number; cat: string; secs: number }[];
+  }[];
 }
 interface AskResult {
   intent: string;
@@ -1218,24 +1331,256 @@ async function refreshLocation(): Promise<void> {
     box.innerHTML = '<div class="rm-empty">还没有位置记录。自动定位或手填一次即可开始积累。</div>';
     return;
   }
-  // 行程只展示「有位置记录的天」，出差的天打标
-  box.innerHTML = days
-    .slice(0, 40)
+  // 按月份折叠：记录再多也只占一个稳定高度，默认展开最新月份。
+  const groups = new Map<string, TripDay[]>();
+  for (const d of days) {
+    const month = d.day.slice(0, 7);
+    const list = groups.get(month) ?? [];
+    list.push(d);
+    groups.set(month, list);
+  }
+  box.innerHTML = Array.from(groups.entries()).slice(0, 12).map(([month, entries], idx) => {
+    const trips = entries.filter((d) => d.trip).length;
+    const rows = entries.map((d) =>
+      `<div class="location-day${d.trip ? " trip" : ""}"><span class="location-date">${escapeHtml(d.day)}</span><i class="location-dot"></i><span class="location-place" title="${escapeHtml(d.place)}">${escapeHtml(d.place)}</span>${d.trip ? '<span class="location-tag">出差</span>' : "<span></span>"}</div>`,
+    ).join("");
+    return `<details class="location-month" ${idx === 0 ? "open" : ""}><summary><span>${escapeHtml(month)}</span><span class="month-meta">${entries.length} 天 · ${trips} 天出差</span></summary><div class="location-month-list">${rows}</div></details>`;
+  }).join("");
+}
+
+function dayWeekdayLabel(dayStr: string): string {
+  const parts = dayStr.split("-").map((n) => parseInt(n, 10));
+  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) return "";
+  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  const names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  return names[dt.getUTCDay()] ?? "";
+}
+
+function renderWorkTrend(days: Brief["days"]): void {
+  const box = document.getElementById("work-trend");
+  if (!box) return;
+  const rows = (days ?? [])
+    .filter((d) => (d.active_min ?? 0) > 0 || (d.interrupt_cnt ?? 0) > 0)
+    .slice(0, 14)
+    .reverse();
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty">还没有足够的每日记录。</div>';
+    return;
+  }
+  const W = 420,
+    H = 188,
+    left = 38,
+    right = 38,
+    top = 18,
+    bottom = 28;
+  const plotW = W - left - right,
+    plotH = H - top - bottom;
+  const maxActive = Math.max(...rows.map((d) => d.active_min ?? 0), 2);
+  // 右轴打断次数：向上取偶数，保证 0 / 50% / 100% 刻度都是干净整数
+  const rawMaxIntr = Math.max(...rows.map((d) => d.interrupt_cnt ?? 0), 2);
+  const maxInterrupt = rawMaxIntr % 2 === 1 ? rawMaxIntr + 1 : rawMaxIntr;
+
+  const xAt = (i: number) =>
+    rows.length === 1 ? left + plotW / 2 : left + (i * plotW) / (rows.length - 1);
+  const yActive = (v: number) => top + plotH - (v / maxActive) * plotH;
+  const yInterrupt = (v: number) => top + plotH - (v / maxInterrupt) * plotH;
+  const activePts = rows
+    .map((d, i) => `${xAt(i).toFixed(1)},${yActive(d.active_min ?? 0).toFixed(1)}`)
+    .join(" ");
+  const interruptPts = rows
+    .map((d, i) => `${xAt(i).toFixed(1)},${yInterrupt(d.interrupt_cnt ?? 0).toFixed(1)}`)
+    .join(" ");
+  const areaPts = `${left},${top + plotH} ${activePts} ${left + plotW},${top + plotH}`;
+
+  const grid = [0, 0.5, 1]
+    .map((ratio) => {
+      const y = top + plotH - ratio * plotH;
+      const actTick = Math.round(maxActive * ratio);
+      const intrTick = Math.round(maxInterrupt * ratio);
+      return `<line class="trend-grid" x1="${left}" y1="${y}" x2="${left + plotW}" y2="${y}" />
+        <text class="trend-axis trend-axis-active" x="${left - 6}" y="${y + 3}" text-anchor="end">${actTick}m</text>
+        <text class="trend-axis trend-axis-intr" x="${left + plotW + 6}" y="${y + 3}" text-anchor="start">${intrTick}次</text>`;
+    })
+    .join("");
+
+  const axisTitles = `<text class="trend-axis trend-axis-active" x="${left - 4}" y="10" text-anchor="end">活跃(分)</text>
+    <text class="trend-axis trend-axis-intr" x="${left + plotW + 4}" y="10" text-anchor="start">打断(次)</text>`;
+
+  const labels = rows
     .map(
-      (d) =>
-        `<div class="rm-item"><div class="rm-main"><div class="rm-title">${escapeHtml(d.day)}　${escapeHtml(d.place)}${
-          d.trip ? '<span class="tag">出差</span>' : ""
-        }</div></div></div>`,
+      (d, i) =>
+        `<text class="trend-axis" x="${xAt(i)}" y="${H - 8}" text-anchor="middle">${escapeHtml(d.day.slice(5))}</text>`,
     )
     .join("");
+  const activeDots = rows
+    .map(
+      (d, i) =>
+        `<circle class="trend-point-active" data-idx="${i}" cx="${xAt(i)}" cy="${yActive(d.active_min ?? 0)}" r="3"></circle>`,
+    )
+    .join("");
+  const interruptDots = rows
+    .map(
+      (d, i) =>
+        `<circle class="trend-point-interrupt" data-idx="${i}" cx="${xAt(i)}" cy="${yInterrupt(d.interrupt_cnt ?? 0)}" r="2.6"></circle>`,
+    )
+    .join("");
+
+  const colW = rows.length > 1 ? plotW / (rows.length - 1) : plotW;
+  const hitCols = rows
+    .map((_, i) => {
+      const cx = xAt(i);
+      const hx = Math.max(left, cx - colW / 2);
+      const hw = Math.min(left + plotW, cx + colW / 2) - hx;
+      return `<rect class="trend-hit" data-idx="${i}" x="${hx.toFixed(1)}" y="${top}" width="${Math.max(12, hw).toFixed(1)}" height="${plotH + 18}" />`;
+    })
+    .join("");
+
+  // 汇总近 14 天出现过的所有分类，渲染与「今天在做什么」一致的彩色图例
+  const catTotals = new Map<number, { cat_id: number; cat: string; secs: number }>();
+  for (const d of rows) {
+    for (const c of d.categories ?? []) {
+      if (c.secs <= 0) continue;
+      const cur = catTotals.get(c.cat_id) ?? {
+        cat_id: c.cat_id,
+        cat: c.cat || CAT_LABEL[c.cat_id] || "其他",
+        secs: 0,
+      };
+      cur.secs += c.secs;
+      catTotals.set(c.cat_id, cur);
+    }
+  }
+  const sortedCats = Array.from(catTotals.values()).sort((a, b) => b.secs - a.secs);
+  const catLegendHtml = sortedCats.length
+    ? `<div class="tl-legend">${sortedCats
+        .map((c) => {
+          const col = CAT_COLOR[c.cat_id] ?? "#94A3B8";
+          return `<span class="tl-leg-item"><i style="background:${col}"></i>${escapeHtml(c.cat)} <b>${fmtDur(c.secs)}</b></span>`;
+        })
+        .join("")}</div>`
+    : "";
+
+  const catRows = rows
+    .map((d, idx) => {
+      const cats = d.categories ?? [];
+      const total = cats.reduce((s, c) => s + Math.max(0, c.secs), 0);
+      const segments =
+        total > 0
+          ? cats
+              .map((c) => {
+                const col = CAT_COLOR[c.cat_id] ?? "#94A3B8";
+                const pct = (Math.max(0, c.secs) / total) * 100;
+                const label = c.cat || CAT_LABEL[c.cat_id] || "其他";
+                return `<span class="trend-cat-seg" data-idx="${idx}" data-cat="${escapeHtml(label)}" data-col="${col}" data-dur="${escapeHtml(fmtDur(c.secs))}" data-pct="${Math.round(pct)}" style="width:${pct.toFixed(2)}%;background:${col}"></span>`;
+              })
+              .join("")
+          : '<span class="trend-cat-seg" data-idx="' +
+            idx +
+            '" style="width:100%;background:#CBD5E1"></span>';
+      return `<div class="trend-cat-row" data-idx="${idx}"><span class="trend-cat-day">${escapeHtml(d.day.slice(5))}</span><span class="trend-cat-track">${segments}</span></div>`;
+    })
+    .join("");
+
+  const defaultInspect =
+    "将鼠标移到上方折线或下方彩色条上，查看当天活跃分钟、专注打断次数与各颜色分类用时明细";
+
+  box.innerHTML = `
+    <div class="trend-legend">
+      <span><i class="trend-key active"></i>左轴：活跃分钟</span>
+      <span><i class="trend-key interrupt"></i>右轴：专注打断（次）</span>
+    </div>
+    <svg class="trend-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="近14天活跃分钟与专注打断趋势">
+      <defs><linearGradient id="trendArea" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#6F63E8" stop-opacity=".22"/><stop offset="1" stop-color="#6F63E8" stop-opacity="0"/></linearGradient></defs>
+      ${grid}${axisTitles}
+      <polygon class="trend-area" points="${areaPts}" />
+      <polyline class="trend-line-active" points="${activePts}" />
+      <polyline class="trend-line-interrupt" points="${interruptPts}" />
+      <line id="trend-cursor" class="trend-cursor" x1="${left}" y1="${top}" x2="${left}" y2="${top + plotH}" hidden />
+      ${activeDots}${interruptDots}${labels}${hitCols}
+    </svg>
+    ${catLegendHtml}
+    <div class="trend-cats">${catRows}</div>
+    <div class="tl-inspect" id="trend-inspect">${defaultInspect}</div>
+  `;
+
+  const inspectEl = document.getElementById("trend-inspect");
+  const cursorEl = document.getElementById("trend-cursor") as SVGLineElement | null;
+  const rowEls = Array.from(box.querySelectorAll<HTMLElement>(".trend-cat-row"));
+  const actDotEls = Array.from(box.querySelectorAll<SVGCircleElement>(".trend-point-active"));
+  const intrDotEls = Array.from(box.querySelectorAll<SVGCircleElement>(".trend-point-interrupt"));
+
+  const formatDayDetail = (idx: number, focusCat?: { cat: string; col: string; dur: string; pct: string }) => {
+    const d = rows[idx];
+    if (!d || !inspectEl) return;
+    const wd = dayWeekdayLabel(d.day);
+    const span = d.start && d.end ? ` · ${d.start}–${d.end}` : "";
+    const actMin = d.active_min ?? 0;
+    const intrCnt = d.interrupt_cnt ?? 0;
+    if (focusCat && focusCat.cat) {
+      inspectEl.innerHTML = `<i class="tl-ins-dot" style="background:${focusCat.col}"></i><b>${escapeHtml(d.day)} ${wd}</b> · <b>${escapeHtml(focusCat.cat)}</b> ${escapeHtml(focusCat.dur)}（占当日 ${escapeHtml(focusCat.pct)}%） · 全天活跃 ${actMin} 分钟 · 打断 <b style="color:#d97706">${intrCnt} 次</b>${escapeHtml(span)}`;
+    } else {
+      const cats = d.categories ?? [];
+      const topLine = cats.length
+        ? cats
+            .slice(0, 3)
+            .map((c) => `${escapeHtml(c.cat || CAT_LABEL[c.cat_id] || "其他")} ${escapeHtml(fmtDur(c.secs))}`)
+            .join(" / ")
+        : "暂无分类明细";
+      inspectEl.innerHTML = `<b>${escapeHtml(d.day)} ${wd}</b>${escapeHtml(span)} · 活跃 <b style="color:#6F63E8">${actMin} 分钟</b> · 专注打断 <b style="color:#d97706">${intrCnt} 次</b> · ${topLine}`;
+    }
+  };
+
+  const highlightIdx = (idx: number | null, focusCat?: { cat: string; col: string; dur: string; pct: string }) => {
+    rowEls.forEach((el, i) => el.classList.toggle("active", i === idx));
+    actDotEls.forEach((el, i) => el.setAttribute("r", i === idx ? "4.6" : "3"));
+    intrDotEls.forEach((el, i) => el.setAttribute("r", i === idx ? "4.2" : "2.6"));
+    if (idx === null) {
+      if (cursorEl) cursorEl.setAttribute("hidden", "");
+      if (inspectEl) inspectEl.textContent = defaultInspect;
+      return;
+    }
+    const cx = xAt(idx).toFixed(1);
+    if (cursorEl) {
+      cursorEl.setAttribute("x1", cx);
+      cursorEl.setAttribute("x2", cx);
+      cursorEl.removeAttribute("hidden");
+    }
+    formatDayDetail(idx, focusCat);
+  };
+
+  box.querySelectorAll<SVGRectElement>(".trend-hit").forEach((rect) => {
+    const idx = Number(rect.dataset.idx ?? -1);
+    rect.addEventListener("mouseenter", () => highlightIdx(idx));
+  });
+  box.querySelector(".trend-chart")?.addEventListener("mouseleave", () => highlightIdx(null));
+
+  rowEls.forEach((row) => {
+    const idx = Number(row.dataset.idx ?? -1);
+    row.addEventListener("mouseenter", () => highlightIdx(idx));
+    row.addEventListener("mouseleave", () => highlightIdx(null));
+  });
+
+  box.querySelectorAll<HTMLElement>(".trend-cat-seg").forEach((seg) => {
+    const idx = Number(seg.dataset.idx ?? -1);
+    const cat = seg.dataset.cat || "";
+    const col = seg.dataset.col || "#94A3B8";
+    const dur = seg.dataset.dur || "";
+    const pct = seg.dataset.pct || "0";
+    if (!cat) return;
+    seg.addEventListener("mouseenter", (e) => {
+      e.stopPropagation();
+      highlightIdx(idx, { cat, col, dur, pct });
+    });
+  });
 }
 
 async function refreshBrief(): Promise<void> {
   const b = await invokeCmd<Brief>("memory_brief", { days: 14, tripDays: 120 });
   if (!b) return;
   const h = b.habits ?? ({} as Brief["habits"]);
+  renderWorkTrend(b.days);
   const samples = h.samples ?? 0;
-  $("hb-samples").textContent = samples > 0 ? `${samples} 天` : "—";
+  $("hb-samples").textContent =
+    samples > 0 ? `${samples} ${h.workday_only ? "个工作日" : "天"}` : "—";
   $("hb-span").textContent =
     samples > 0 && h.avg_start && h.avg_end ? `${h.avg_start} → ${h.avg_end}` : "—";
   const activeMin = h.avg_active_min ?? 0;
@@ -1487,6 +1832,7 @@ document.addEventListener("visibilitychange", () => {
 });
 void refreshReminders();
 void refreshToday();
+void refreshBrief();
 void loadLowPower();
 void loadRemindPrefs();
 window.setInterval(() => {
@@ -1495,6 +1841,7 @@ window.setInterval(() => {
   void loadLlmStatus();
   void refreshReminders();
   void refreshToday();
+  void refreshBrief();
 }, 20000);
 
 void refresh();

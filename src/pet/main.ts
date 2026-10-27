@@ -273,6 +273,7 @@ function pick<T>(arr: T[]): T {
 
 let lastTapTs = 0;
 let tapTimer: number | undefined;
+let tapSeq = 0;
 
 function onTap(): void {
   const now = Date.now();
@@ -288,7 +289,14 @@ function onTap(): void {
   lastTapTs = now;
   tapTimer = window.setTimeout(() => {
     tapTimer = undefined;
-    say(pick(IDLE_LINES));
+    void (async () => {
+      const line = await invokeCmd<string>("pet_tap_line", { seq: tapSeq++ });
+      if (line && line.trim()) {
+        say(line.trim(), 5800);
+      } else {
+        say(pick(IDLE_LINES));
+      }
+    })();
   }, 260);
 }
 
@@ -416,9 +424,6 @@ async function onMenuAction(act: string): Promise<void> {
       }
       break;
     }
-    case "say":
-      say(pick(IDLE_LINES));
-      break;
     case "present": {
       // 窗口化共享屏幕无法被全屏检测识别，这里让用户主动声明。
       // 先说话再躲：set_presentation 会立刻隐藏窗口，气泡要抢在它之前展示。

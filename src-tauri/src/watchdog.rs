@@ -17,7 +17,7 @@
 // 采样成本：Toolhelp 快照 + GetProcessMemoryInfo，每 20s 一次 < 2ms，可忽略。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -52,13 +52,20 @@ pub struct Metrics {
 
 /* ------------------------------ 阈值与状态 ------------------------------ */
 
-static MEM_SOFT_MB: AtomicU64 = AtomicU64::new(500);
-static MEM_HARD_MB: AtomicU64 = AtomicU64::new(900);
-static CPU_SOFT_X100: AtomicU64 = AtomicU64::new(2500); // 25.00%
-static CPU_HARD_X100: AtomicU64 = AtomicU64::new(6000); // 60.00%
+// 注意：WebView2 子进程树包含 browser + GPU + 3 个窗口渲染器共 7~8 个进程。
+// APNG 桌宠动画 + 面板频繁交互 + LLM 流式渲染时，8 个进程合计单核等效 CPU
+// 常在 30%~70% 之间波动，私有提交约 380~450MB。
+// 旧阈值（CPU 软 25% / 硬 60%）在用户连续添加/编辑多条待办时会误触发熔断退出（实测踩到）。
+static MEM_SOFT_MB: AtomicU64 = AtomicU64::new(700);
+static MEM_HARD_MB: AtomicU64 = AtomicU64::new(1500);
+static CPU_SOFT_X100: AtomicU64 = AtomicU64::new(8500);  // 85.00%（8 进程合计相对单核）
+static CPU_HARD_X100: AtomicU64 = AtomicU64::new(24000); // 240.00%（8 进程合计约 2.4 核持续满载）
 static INTERVAL_S: AtomicU64 = AtomicU64::new(20);
 static HARD_BREACH: AtomicU32 = AtomicU32::new(0);
 static TRIPPED: AtomicU32 = AtomicU32::new(0);
+/// 仅当自动化测试通过 `/watchdog?...` 显式注入低阈值，或设置了 `WORKMATE_WD_EXIT=1` 时，
+/// 才允许在熔断时执行 `app.exit(7)`；日常用户态只自动降级低功耗并告警，绝不强退用户进程。
+static EXIT_ON_TRIP: AtomicBool = AtomicBool::new(false);
 
 fn last_metrics() -> &'static Mutex<Metrics> {
     static M: OnceLock<Mutex<Metrics>> = OnceLock::new();
@@ -73,6 +80,9 @@ fn last_cpu() -> &'static Mutex<Option<(HashMap<u32, u64>, Instant)>> {
 }
 
 pub fn configure(mem_soft: Option<u64>, mem_hard: Option<u64>, cpu_soft: Option<f64>, cpu_hard: Option<f64>) {
+    if mem_soft.is_some() || mem_hard.is_some() || cpu_soft.is_some() || cpu_hard.is_some() {
+        EXIT_ON_TRIP.store(true, Ordering::Relaxed);
+    }
     if let Some(v) = mem_soft {
         MEM_SOFT_MB.store(v, Ordering::Relaxed);
     }
@@ -320,23 +330,38 @@ pub fn start(app: tauri::AppHandle) {
                     "watchdog HARD breach #{n} | tree_priv={:.1}MB tree_rss={:.1}MB cpu={:.1}% procs={} handles={}",
                     m.tree_priv_mb, m.tree_rss_mb, m.cpu_pct, m.procs, m.handles
                 ));
-                // 连续两次才熔断：单次尖峰（如刚弹出的面板首帧）不算故障
+                let allow_exit = EXIT_ON_TRIP.load(Ordering::Relaxed)
+                    || std::env::var("WORKMATE_WD_EXIT")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                // 连续两次才判定为持续过载：单次尖峰（如刚弹出的面板首帧）不算故障
                 if n >= 2 {
-                    TRIPPED.store(1, Ordering::Relaxed);
                     let db = app.state::<crate::db::Db>();
                     let db_path = db.path().display().to_string();
                     let db_size = db.size_bytes();
-                    crate::startup_log(&format!(
-                        "watchdog TRIP | tree_priv={:.1}MB tree_rss={:.1}MB priv={:.1}MB cpu={:.1}% procs={} handles={} db={} ({:.1}MB) th={}",
-                        m.tree_priv_mb, m.tree_rss_mb, m.priv_mb, m.cpu_pct, m.procs, m.handles,
-                        db_path, db_size as f64 / 1_048_576.0,
-                        thresholds()
-                    ));
-                    let _ = app.emit("wm:trip", &m);
-                    // 留 1.2s 给前端把话说完、日志刷盘
-                    std::thread::sleep(std::time::Duration::from_millis(1200));
-                    app.exit(7);
-                    return;
+                    if allow_exit {
+                        TRIPPED.store(1, Ordering::Relaxed);
+                        crate::startup_log(&format!(
+                            "watchdog TRIP | tree_priv={:.1}MB tree_rss={:.1}MB priv={:.1}MB cpu={:.1}% procs={} handles={} db={} ({:.1}MB) th={}",
+                            m.tree_priv_mb, m.tree_rss_mb, m.priv_mb, m.cpu_pct, m.procs, m.handles,
+                            db_path, db_size as f64 / 1_048_576.0,
+                            thresholds()
+                        ));
+                        let _ = app.emit("wm:trip", &m);
+                        // 留 1.2s 给前端把话说完、日志刷盘
+                        std::thread::sleep(std::time::Duration::from_millis(1200));
+                        app.exit(7);
+                        return;
+                    } else {
+                        // 日常用户态：绝不强杀用户进程！自动通知桌宠切入低功耗静态帧降温，并清零计数避免刷屏。
+                        crate::startup_log(&format!(
+                            "watchdog THROTTLE (non-fatal) | tree_priv={:.1}MB tree_rss={:.1}MB priv={:.1}MB cpu={:.1}% procs={} handles={} db={} ({:.1}MB) -> auto low-power",
+                            m.tree_priv_mb, m.tree_rss_mb, m.priv_mb, m.cpu_pct, m.procs, m.handles,
+                            db_path, db_size as f64 / 1_048_576.0
+                        ));
+                        let _ = app.emit("wm:lowpower", "1");
+                        HARD_BREACH.store(0, Ordering::Relaxed);
+                    }
                 }
             } else {
                 HARD_BREACH.store(0, Ordering::Relaxed);

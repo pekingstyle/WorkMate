@@ -202,11 +202,14 @@ html, body {
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  background: #FFFFFF;
+  background: rgba(255,255,255,.62);
+  backdrop-filter: blur(12px) saturate(135%);
+  -webkit-backdrop-filter: blur(12px) saturate(135%);
   color: #2C2C2A;
   transition: background 0.14s ease, transform 0.1s ease;
   white-space: nowrap;
 }
+.btn-act:focus-visible { outline: 2px solid #7B68EE; outline-offset: 2px; }
 
 .btn-act:hover {
   background: #EFECE1;

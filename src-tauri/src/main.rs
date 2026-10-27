@@ -725,6 +725,61 @@ fn spawn_maintenance(app: tauri::AppHandle) {
 /// 巡检 10 分钟一次（不是 30 分钟）：跨天补写、23:50 写当天这两件事
 /// 各有一个时间点，巡检太粗会错过。位置仍按 30 分钟节流——
 /// 出差是按天计的，采太密既耗电又让 locations 表堆垃圾。
+/// 高优风险（L3：高优/批量待办逾期、连续久坐 ≥120 分钟）定期主动提醒。
+/// 严格遵守：演示模式避让（`perception::presenting()`）、会议中避让、50 分钟专注避让、静默时段避让、离开避让，且每 2 小时最多提醒一次。
+fn maybe_notify_high_risk(app: &tauri::AppHandle, risks: &[db::repo::RiskRow], now: i64) {
+    let high: Vec<&db::repo::RiskRow> = risks.iter().filter(|r| r.level >= 3).collect();
+    if high.is_empty() {
+        return;
+    }
+    // 演示/全屏模式、开会中、50 分钟专注中、静默时段、或人不在电脑前：一律不打扰
+    if perception::presenting()
+        || perception::current_category() == perception::AppCategory::Meeting
+        || focus::is_active()
+        || notify::quiet_hours()
+    {
+        return;
+    }
+    if !notify::forced_awake()
+        && db::with_conn(|c| db::repo::user_away(c, now)).unwrap_or(false)
+    {
+        return;
+    }
+    // 冷却窗口：每 2 小时（7200 秒）最多主动提醒一次高优风险
+    let last_ts: i64 = db::with_conn(|c| db::repo::get_setting(c, "risk.high_notify_last_ts"))
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    if now - last_ts < 7200 {
+        return;
+    }
+
+    let top = high[0];
+    let warm = if top.kind == "long_focus" {
+        "站起来接杯水、活动一下肩颈，回来效率更高。"
+    } else {
+        "先挑最紧要的一件处理掉，或者顺延到合适的时间。"
+    };
+    let payload = serde_json::json!({
+        "ids": [],
+        "title": top.title,
+        "count": high.len(),
+        "level": 0,
+        "kinds": [],
+        "badge": "⚠️ 高优风险提醒",
+        "meta": top.detail,
+        "warm": warm,
+        "items": [],
+        "risk_alert": true,
+        "tz": tz::active(),
+        "ts": now,
+    });
+    let _ = app.emit("wm:reminder", &payload);
+    let _ = db::with_conn(|c| db::repo::set_setting(c, "risk.high_notify_last_ts", &now.to_string()));
+    startup_log(&format!("risk: high-priority proactive reminder sent ({})", top.title));
+}
+
 fn spawn_memory(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         // 先只刷缓存（不落库）：让「建待办打位置标记」这条路径尽早可用。
@@ -748,6 +803,8 @@ fn spawn_memory(app: tauri::AppHandle) {
         let mut last_day = logs::bj_date(now_sec());
         let mut last_loc = 0i64;
         let mut last_daily_at = 0i64;
+        let mut last_full_risk_at = 0i64;
+        let mut last_high_risk_at = 0i64;
 
         loop {
             let now = now_sec();
@@ -764,7 +821,20 @@ fn spawn_memory(app: tauri::AppHandle) {
             }
 
             let n = memory::rebuild_recent(2);
-            let risks = memory::scan_risks();
+            // 分级巡检策略：
+            // - 中低优先级趋势/习惯类风险（L1/L2）：每 60 分钟（3600s）巡检一次，仅面板展示；
+            // - 高优先级风险（L3：高优逾期、连续久坐 ≥120m）：每 30 分钟（1800s）巡检一次，并在非演示/非会议/非静默状态下定期提醒。
+            let risks = if now - last_full_risk_at >= 3600 {
+                last_full_risk_at = now;
+                last_high_risk_at = now;
+                memory::scan_risks()
+            } else if now - last_high_risk_at >= 1800 {
+                last_high_risk_at = now;
+                memory::scan_high_risks()
+            } else {
+                db::with_conn(|c| db::repo::open_risks(c, 20)).unwrap_or_default()
+            };
+            maybe_notify_high_risk(&app, &risks, now);
             startup_log(&format!("memory: profiles={n} risks={}", risks.len()));
 
             let today = logs::bj_date(now);
@@ -796,7 +866,6 @@ fn spawn_memory(app: tauri::AppHandle) {
             std::thread::sleep(Duration::from_secs(600));
         }
     });
-    let _ = app;
 }
 
 /* ------------------------------ 托盘 ------------------------------ */
@@ -1054,8 +1123,10 @@ fn main() {
             commands::focus_stop,
             commands::alert_current,
             commands::alert_close,
+            commands::alert_reopen,
             commands::alert_complete,
-            commands::alert_snooze
+            commands::alert_snooze,
+            commands::pet_tap_line
         ])
         .setup(|app| {
             startup_log("setup begin");

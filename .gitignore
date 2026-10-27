@@ -11,6 +11,7 @@ src-tauri/gen/
 .wbapp_*.genie
 .vscode/
 .idea/
+intent/
 
 # Local benchmarks, desktop screenshots, and internal docs (keep local only, never push)
 bench/

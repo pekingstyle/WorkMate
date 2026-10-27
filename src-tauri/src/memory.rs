@@ -61,6 +61,9 @@ pub fn build_day(day: &str) -> Result<crate::db::repo::DayProfile, String> {
 
         // 若当天尚有未过期的 5s 明细（近 2 天），优先取精确到秒的首末活跃采样；
         // 更早的历史日则回落到 5 分钟聚合桶（首桶起点 → 末桶终点）。
+        // 注意：前一天熬夜跨过 00:00（00:00 ~ 05:00）的残留采样不能算作当天早晨的「开始工作时间」，
+        // 因此优先取当地凌晨 05:00（dawn = start + 5 * 3600）之后的首个活跃点。
+        let dawn = start + 5 * 3600;
         let (ev_first, ev_last): (Option<i64>, Option<i64>) = c
             .query_row(
                 "SELECT min(ts), max(ts) FROM events
@@ -69,7 +72,26 @@ pub fn build_day(day: &str) -> Result<crate::db::repo::DayProfile, String> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap_or((None, None));
-        let first_active = ev_first.or(rollup_first);
+        let ev_first_daytime: Option<i64> = c
+            .query_row(
+                "SELECT min(ts) FROM events
+                 WHERE ts >= ?1 AND ts < ?2 AND idle_s < 60",
+                rusqlite::params![dawn, end],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        let rollup_first_daytime: Option<i64> = c
+            .query_row(
+                "SELECT min(bucket) FROM rollup_5m
+                 WHERE bucket >= ?1 AND bucket < ?2 AND focus_sec > 0",
+                rusqlite::params![dawn, end],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        let first_active = ev_first_daytime
+            .or(rollup_first_daytime)
+            .or(ev_first)
+            .or(rollup_first);
         let last_active = ev_last.or_else(|| rollup_last.map(|b| b + 300));
 
         // 分类分布：{"0":秒,"1":秒,...}
@@ -783,23 +805,41 @@ pub fn warm_hint() -> String {
 
 /* ============================ 风险扫描 ============================ */
 
-/// 风险不是"记下来"的，是"算出来"的。每次调用重算一遍全部四类。
-///
-/// 用 replace_open_risk（先闭旧再开新）而不是无脑 INSERT：
-/// 否则每 5 分钟扫一次，一天能堆几百条同内容风险，噪音淹没信号。
-pub fn scan_risks() -> Vec<crate::db::repo::RiskRow> {
+/// 仅扫描高优先级实时风险（L3：高优/批量待办逾期、当前连续专注/久坐 ≥ 120 分钟）。
+/// 用于 30 分钟级巡检与定期主动提醒。
+pub fn scan_high_risks() -> Vec<crate::db::repo::RiskRow> {
     let now = now_sec();
 
     // 1) 逾期：到点已弹、半小时还没标完成
-    let overdue = crate::db::with_conn(|c| crate::db::repo::overdue_count(c, now)).unwrap_or(0);
+    let (overdue, high_overdue) = crate::db::with_conn(|c| {
+        let total = crate::db::repo::overdue_count(c, now).unwrap_or(0);
+        let hi: i64 = c
+            .query_row(
+                "SELECT count(*) FROM reminders
+                 WHERE kind = 0 AND status = 1 AND priority = 1
+                   AND fired_at IS NOT NULL AND ?1 - fired_at > 1800",
+                rusqlite::params![now],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok((total, hi))
+    })
+    .unwrap_or((0, 0));
+
     if overdue > 0 {
+        let lvl = if overdue >= 3 || high_overdue >= 1 { 3 } else { 2 };
+        let title = if high_overdue >= 1 {
+            format!("{overdue} 件待办逾期未处理（含 {high_overdue} 件高优）")
+        } else {
+            format!("{overdue} 件待办逾期未处理")
+        };
         let _ = crate::db::with_conn(|c| {
             crate::db::repo::replace_open_risk(
                 c,
                 now,
                 "overdue",
-                if overdue >= 3 { 3 } else { 2 },
-                &format!("{overdue} 件待办逾期未处理"),
+                lvl,
+                &title,
                 "已提醒但超过 30 分钟仍未标记完成",
             )
         });
@@ -807,7 +847,58 @@ pub fn scan_risks() -> Vec<crate::db::repo::RiskRow> {
         let _ = crate::db::with_conn(|c| crate::db::repo::clear_risk_kind(c, "overdue"));
     }
 
-    // 2) 连续顺延：待办被反复挂回去，说明时间点定得不对（或一直在躲）
+    // 2) 超长专注 / 连续久坐：当前仍在进行且 ≥120 分钟升为 L3 高优警告；今日历史峰值 ≥90 分钟为 L1 轻度提示
+    let cur_sit = crate::perception::current_sit_mins();
+    let focus_max = crate::db::with_conn(|c| {
+        c.query_row(
+            "SELECT COALESCE(max(focus_min), 0) FROM events WHERE ts >= ?1",
+            [crate::notify::bj_day_start()],
+            |r| r.get::<_, i64>(0),
+        )
+    })
+    .unwrap_or(0)
+    .max(cur_sit);
+
+    if cur_sit >= 120 {
+        let _ = crate::db::with_conn(|c| {
+            crate::db::repo::replace_open_risk(
+                c,
+                now,
+                "long_focus",
+                3,
+                &format!("当前已连续工作 {cur_sit} 分钟未休息"),
+                "连续久坐超过 2 小时，建议立即起身活动 3–5 分钟",
+            )
+        });
+    } else if focus_max >= 90 {
+        let _ = crate::db::with_conn(|c| {
+            crate::db::repo::replace_open_risk(
+                c,
+                now,
+                "long_focus",
+                1,
+                &format!("今天最长连续专注 {focus_max} 分钟"),
+                "超过 90 分钟未起身，注意劳逸结合",
+            )
+        });
+    } else {
+        let _ = crate::db::with_conn(|c| crate::db::repo::clear_risk_kind(c, "long_focus"));
+    }
+
+    crate::db::with_conn(|c| crate::db::repo::open_risks(c, 20)).unwrap_or_default()
+}
+
+/// 风险不是"记下来"的，是"算出来"的。每次调用重算一遍全部五类。
+///
+/// 分级策略：
+///   - L3（高优警告）：高优任务逾期 / ≥3 件待办逾期 / 当前连续久坐 ≥120 分钟（支持定期主动提醒，避让演示模式）
+///   - L2（中优注意）：1–2 件普通待办逾期 / ≥3 件待办被反复顺延 / 专注打断明显上升
+///   - L1（轻度提示）：今日曾有 ≥90 分钟长专注 / 近 7 天 ≥3 天熬夜（低频巡检，仅面板展示，不主动弹窗打扰）
+pub fn scan_risks() -> Vec<crate::db::repo::RiskRow> {
+    let now = now_sec();
+    let _ = scan_high_risks();
+
+    // 3) 连续顺延（L2）：待办被反复挂回去，说明时间点定得不对（或一直在躲）
     let deferred = crate::db::with_conn(crate::db::repo::deferred_count).unwrap_or(0);
     if deferred >= 3 {
         let _ = crate::db::with_conn(|c| {
@@ -824,31 +915,7 @@ pub fn scan_risks() -> Vec<crate::db::repo::RiskRow> {
         let _ = crate::db::with_conn(|c| crate::db::repo::clear_risk_kind(c, "defer_chain"));
     }
 
-    // 3) 超长专注：连续 90 分钟以上不休息
-    let focus_max = crate::db::with_conn(|c| {
-        c.query_row(
-            "SELECT COALESCE(max(focus_min), 0) FROM events WHERE ts >= ?1",
-            [crate::notify::bj_day_start()],
-            |r| r.get::<_, i64>(0),
-        )
-    })
-    .unwrap_or(0);
-    if focus_max >= 90 {
-        let _ = crate::db::with_conn(|c| {
-            crate::db::repo::replace_open_risk(
-                c,
-                now,
-                "long_focus",
-                1,
-                &format!("今天最长连续专注 {focus_max} 分钟"),
-                "超过 90 分钟没起身，注意休息",
-            )
-        });
-    } else {
-        let _ = crate::db::with_conn(|c| crate::db::repo::clear_risk_kind(c, "long_focus"));
-    }
-
-    // 4) 熬夜：近 7 天里有 3 天以上在 23 点后还在活跃
+    // 4) 熬夜（L1 轻度习惯提示）：近 7 天里有 3 天以上在 23 点后还在活跃
     let late_days = crate::db::with_conn(late_night_days).unwrap_or(0);
     if late_days >= 3 {
         let _ = crate::db::with_conn(|c| {
@@ -856,7 +923,7 @@ pub fn scan_risks() -> Vec<crate::db::repo::RiskRow> {
                 c,
                 now,
                 "late_night",
-                2,
+                1,
                 &format!("近 7 天有 {late_days} 天在 23 点后仍在工作"),
                 "长期熬夜会显著拉低次日专注时长",
             )
@@ -865,7 +932,7 @@ pub fn scan_risks() -> Vec<crate::db::repo::RiskRow> {
         let _ = crate::db::with_conn(|c| crate::db::repo::clear_risk_kind(c, "late_night"));
     }
 
-    // 5) 专注打断趋势：近期被打断次数明显上升时给出提醒
+    // 5) 专注打断趋势（L2）：近期被打断次数明显上升时给出提醒
     let trend = crate::focus::compute_interrupt_trend();
     if trend.direction == "up" && (trend.recent_avg >= 3.0 || trend.today_count >= 5) {
         let _ = crate::db::with_conn(|c| {
@@ -1001,6 +1068,13 @@ pub fn brief(days: i64, trip_days: i64) -> serde_json::Value {
 }
 
 fn profile_line(p: &crate::db::repo::DayProfile) -> serde_json::Value {
+    let mut categories: Vec<(i64, i64)> =
+        serde_json::from_str::<std::collections::BTreeMap<String, i64>>(&p.cat_json)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(cat, secs)| cat.parse::<i64>().ok().map(|id| (id, secs)))
+            .collect();
+    categories.sort_by_key(|(_, secs)| std::cmp::Reverse(*secs));
     json!({
         "day": p.day,
         "start": p.first_active.map(bj_hm_of).unwrap_or_default(),
@@ -1011,42 +1085,100 @@ fn profile_line(p: &crate::db::repo::DayProfile) -> serde_json::Value {
         "reminded": p.remind_cnt,
         "done": p.done_cnt,
         "place": p.location,
+        "categories": categories.into_iter().take(8).map(|(cat, secs)| json!({
+            "cat_id": cat,
+            "cat": cat_label(cat),
+            "secs": secs,
+        })).collect::<Vec<_>>(),
     })
 }
 
-/// 从若干天的画像里提炼「工作习惯」（均值比单天更能代表习惯）
+/// 判断 "YYYY-MM-DD" 是否为工作日（周一至周五）。
+fn is_workday_str(day: &str) -> bool {
+    let parts: Vec<i64> = day
+        .split('-')
+        .filter_map(|s| s.parse::<i64>().ok())
+        .collect();
+    if parts.len() != 3 {
+        return true;
+    }
+    let (y, m, d) = (parts[0], parts[1], parts[2]);
+    let my = if m <= 2 { y - 1 } else { y };
+    let mp = if m <= 2 { m + 9 } else { m - 3 };
+    let era = my.div_euclid(400);
+    let yoe = my.rem_euclid(400);
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let dow0 = (days + 4).rem_euclid(7); // 0=周日, 1..5=周一..周五, 6=周六
+    (1..=5).contains(&dow0)
+}
+
+/// 从若干天的画像里提炼「工作习惯」（仅统计工作日周一至周五，排除周末晚起对均值/中位数的污染）
 fn summarize_habits(ps: &[crate::db::repo::DayProfile]) -> serde_json::Value {
     summarize_habits_with_offset(ps, crate::tz::offset_secs())
 }
 
 fn summarize_habits_with_offset(ps: &[crate::db::repo::DayProfile], tz_off: i64) -> serde_json::Value {
     let trend = crate::focus::compute_interrupt_trend();
-    let live: Vec<&crate::db::repo::DayProfile> =
+    let all_live: Vec<&crate::db::repo::DayProfile> =
         ps.iter().filter(|p| p.active_sec > 0).collect();
-    if live.is_empty() {
+    if all_live.is_empty() {
         return json!({
             "samples": 0,
+            "workday_only": true,
             "interrupt_trend": trend,
         });
     }
+    // 只用工作日（周一至周五）计算工作习惯；仅当完全没有任何工作日样本时才回退全部样本
+    let workdays: Vec<&crate::db::repo::DayProfile> = all_live
+        .iter()
+        .copied()
+        .filter(|p| is_workday_str(&p.day))
+        .collect();
+    let live: &[&crate::db::repo::DayProfile] = if workdays.is_empty() {
+        &all_live
+    } else {
+        &workdays
+    };
+
     let n = live.len() as f64;
     let avg_active = live.iter().map(|p| p.active_sec).sum::<i64>() as f64 / n;
-    let avg_start = live
+    // 中位数比算术平均更适合作息边界：出差、临时离开和跨午夜会制造离群点，
+    // 直接平均会把「下午才开工」或「下午暂时关机」误当成典型收工时间。
+    let median_wall = |values: Vec<f64>| -> f64 {
+        if values.is_empty() { return 0.0; }
+        let mut v = values;
+        v.sort_by(|a, b| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = v.len() / 2;
+        if v.len() % 2 == 0 { (v[mid - 1] + v[mid]) / 2.0 } else { v[mid] }
+    };
+    // 过滤掉 00:00~05:00 跨午夜熬夜残留点，只统计 05:00 之后的早晨/白天开工时间
+    let start_samples: Vec<f64> = live
         .iter()
         .filter_map(|p| p.first_active)
         .map(|t| (t + tz_off).rem_euclid(86_400) as f64)
-        .sum::<f64>()
-        / live.iter().filter(|p| p.first_active.is_some()).count().max(1) as f64;
-    let avg_end = live
+        .filter(|&sod| sod >= 5.0 * 3600.0)
+        .collect();
+    let avg_start = if !start_samples.is_empty() {
+        median_wall(start_samples)
+    } else {
+        median_wall(
+            live.iter()
+                .filter_map(|p| p.first_active)
+                .map(|t| (t + tz_off).rem_euclid(86_400) as f64)
+                .collect(),
+        )
+    };
+    let avg_end = median_wall(live
         .iter()
         .filter_map(|p| p.last_active)
         .map(|t| (t + tz_off).rem_euclid(86_400) as f64)
-        .sum::<f64>()
-        / live.iter().filter(|p| p.last_active.is_some()).count().max(1) as f64;
+        .collect());
 
     // 分类占比：把 cat_json 累加后取 Top3
     let mut agg: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
-    for p in &live {
+    for p in live {
         if let Ok(m) = serde_json::from_str::<std::collections::BTreeMap<String, i64>>(&p.cat_json) {
             for (k, v) in m {
                 if let Ok(cat) = k.parse::<i64>() {
@@ -1072,6 +1204,8 @@ fn summarize_habits_with_offset(ps: &[crate::db::repo::DayProfile], tz_off: i64)
 
     json!({
         "samples": live.len(),
+        "total_days": all_live.len(),
+        "workday_only": !workdays.is_empty(),
         "avg_start": fmt_hm(avg_start),
         "avg_end": fmt_hm(avg_end),
         "avg_active_min": (avg_active / 60.0).round() as i64,
@@ -1438,7 +1572,7 @@ fn render_facts(v: &serde_json::Value) -> String {
     if let Some(h) = v.get("habits") {
         if h["samples"].as_i64().unwrap_or(0) > 0 {
             out.push(format!(
-                "工作习惯（{} 天样本）：平均 {} 开始、{} 结束，日均活跃 {} 分钟",
+                "工作习惯（{} 个工作日样本，已排除周末）：工作日平均 {} 开始、{} 结束，日均活跃 {} 分钟",
                 h["samples"].as_i64().unwrap_or(0),
                 h["avg_start"].as_str().unwrap_or(""),
                 h["avg_end"].as_str().unwrap_or(""),
@@ -1555,6 +1689,36 @@ mod tests {
         assert_eq!(h["avg_start"].as_str(), Some("12:55"));
         assert_eq!(h["avg_end"].as_str(), Some("22:10"));
         assert_eq!(h["avg_active_min"].as_i64(), Some(123));
+    }
+
+    #[test]
+    fn summarize_habits_excludes_weekends_and_midnight_spillover() {
+        let sun = crate::db::repo::DayProfile {
+            day: "2026-10-25".into(), // 周日 12:55 开工
+            first_active: Some(4 * 3600 + 55 * 60),
+            last_active: Some(14 * 3600),
+            active_sec: 120 * 60,
+            ..Default::default()
+        };
+        let mon = crate::db::repo::DayProfile {
+            day: "2026-10-26".into(), // 周一 10:00 开工 (UTC 02:00)
+            first_active: Some(2 * 3600),
+            last_active: Some(12 * 3600),
+            active_sec: 300 * 60,
+            ..Default::default()
+        };
+        let tue = crate::db::repo::DayProfile {
+            day: "2026-10-27".into(), // 周二 09:20 开工 (UTC 01:20)
+            first_active: Some(1 * 3600 + 20 * 60),
+            last_active: Some(11 * 3600),
+            active_sec: 240 * 60,
+            ..Default::default()
+        };
+        let h = summarize_habits_with_offset(&[sun, mon, tue], 8 * 3600);
+        assert_eq!(h["samples"].as_i64(), Some(2), "应仅统计 2 个工作日");
+        assert_eq!(h["workday_only"].as_bool(), Some(true));
+        assert_eq!(h["avg_start"].as_str(), Some("09:40"), "周日 12:55 不应拉晚工作日均值");
+        assert_eq!(h["avg_active_min"].as_i64(), Some(270));
     }
 
     #[test]
